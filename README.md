@@ -150,7 +150,8 @@ other paths through its arguments or configuration.
 
 ## Use and manage grants
 
-For agent integration, use the bundled [delegated-sudo skill](skills/delegated-sudo/SKILL.md).
+The bundled [delegated-sudo skill](skills/delegated-sudo/SKILL.md) explains how an
+agent helps you prepare a grant and then uses the token within its permitted scope.
 
 Run the permitted command without a leading `sudo`:
 
