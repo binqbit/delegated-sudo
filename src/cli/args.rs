@@ -112,11 +112,13 @@ HELP (no sudo required)
   delegated-sudo --help       Show this complete guide.
   delegated-sudo -h           Show this complete guide.
   delegated-sudo help         Show this complete guide.
+  delegated-sudo --version    Show the installed version (also -V).
 "#;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "delegated-sudo",
+    version,
     about = "Run root commands with an expiring command-scoped delegation token",
     arg_required_else_help = true,
     override_help = OVERVIEW
