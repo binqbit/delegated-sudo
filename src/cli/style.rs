@@ -26,7 +26,7 @@ impl Role {
             Self::Name => "1;35",
             Self::Option => "33",
             Self::Path => "94",
-            Self::Value => "32",
+            Self::Value => "",
             Self::Muted => "2",
             Self::Success => "32",
             Self::Warning => "33",
@@ -59,8 +59,9 @@ impl Theme {
     }
 
     pub(super) fn paint(self, role: Role, value: &str) -> String {
-        if self.enabled && !value.is_empty() {
-            format!("\x1b[{}m{value}\x1b[0m", role.code())
+        let code = role.code();
+        if self.enabled && !value.is_empty() && !code.is_empty() {
+            format!("\x1b[{code}m{value}\x1b[0m")
         } else {
             value.into()
         }
@@ -137,9 +138,9 @@ impl Theme {
                     ))
             {
                 Some(Role::Command)
-            } else if bare.starts_with('/') || bare.contains("<PATH>") {
-                Some(Role::Path)
-            } else if (bare.starts_with('<') && bare.ends_with('>'))
+            } else if bare.starts_with('/')
+                || bare.contains("<PATH>")
+                || (bare.starts_with('<') && bare.ends_with('>'))
                 || bare == "[ARGUMENTS...]"
                 || executable.is_some_and(|start| index > start)
             {
@@ -226,7 +227,10 @@ mod tests {
         assert!(output.contains("\x1b[1;36mdelegated-sudo\x1b[0m"));
         assert!(output.contains("\x1b[1;35m'Мій грант'\x1b[0m"));
         assert!(output.contains("\x1b[33m--allow-args\x1b[0m"));
-        assert!(output.contains("\x1b[94m'/srv/my app'\x1b[0m"));
+        assert!(output.contains("\x1b[33m--ttl\x1b[0m 30d "));
+        assert!(output.contains("\x1b[33m--dir\x1b[0m '/srv/my app' "));
+        assert!(output.contains("\x1b[1;36mdocker\x1b[0m compose up "));
+        assert_eq!(Theme::new(true).paint(Role::Value, "30d"), "30d");
         let mut plain = output;
         for role in [
             Role::Command,

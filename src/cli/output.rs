@@ -183,11 +183,6 @@ fn invocation(executable: &AllowedExecutable, theme: Theme) -> String {
     parts.extend(arguments.iter().map(|argument| {
         let role = if argument.starts_with('-') {
             Role::Option
-        } else if argument.starts_with('/')
-            || argument.starts_with("./")
-            || argument.starts_with("../")
-        {
-            Role::Path
         } else {
             Role::Value
         };
@@ -657,6 +652,8 @@ mod tests {
         let colored = assert_only_styles_changed(plain, colored);
         assert_eq!(colored.matches(token).count(), 1);
         assert!(colored.contains(&format!(" {token}\n")));
+        assert!(colored.contains("\x1b[1;36mdocker\x1b[0m compose "));
+        assert!(colored.contains("\x1b[33m--file\x1b[0m '/srv/my project/compose.yml' "));
 
         let mut plain = Vec::new();
         let mut colored = Vec::new();

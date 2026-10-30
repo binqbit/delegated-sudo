@@ -30,6 +30,7 @@ without arguments also shows its options and example.
 In a terminal, help and grant output distinguish commands, grant names, options,
 paths, and statuses with color. Redirected output remains plain text. Set
 `NO_COLOR=1` to disable colors; `TERM=dumb` also disables them.
+Ordinary command arguments and option values keep the terminal's default color.
 
 ## Required access rules
 
