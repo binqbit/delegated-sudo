@@ -1,6 +1,6 @@
 ---
 name: delegated-sudo
-description: Help users create or renew delegated-sudo grants, and use provided delegation tokens for authorized privileged commands. Apply when the user needs commands to grant access or gives the agent a token and command scope.
+description: Automatically use this skill whenever a task concerns delegated-sudo or delegated permissions to execute commands, including grant setup, tokens, usage, renewal, and troubleshooting. Help users manage grants and use them for authorized privileged work.
 ---
 
 # Delegated sudo
