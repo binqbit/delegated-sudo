@@ -27,6 +27,10 @@ The guide starts with creation options, including `--allow-args`, `--dir`, and
 `--recursive`, and an example combining them. `delegated-sudo grant create`
 without arguments also shows its options and example.
 
+In a terminal, help and grant output distinguish commands, grant names, options,
+paths, and statuses with color. Redirected output remains plain text. Set
+`NO_COLOR=1` to disable colors; `TERM=dumb` also disables them.
+
 ## Required access rules
 
 System authorization and delegation have separate responsibilities:

@@ -2,6 +2,7 @@
 
 mod args;
 mod output;
+mod style;
 mod token;
 
 use crate::application;
@@ -15,18 +16,20 @@ use std::io::{self, Write};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
+use style::{Role, Theme};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const SUDO: &str = "/run/wrappers/bin/sudo";
 
 fn display_administration(mut request: Request) -> Result<i32> {
     let mut writer = io::stdout().lock();
+    let theme = Theme::stdout();
     let mut seen_cursors = HashSet::new();
     let mut listed_grants = Vec::new();
     loop {
         match application::administer(request)? {
             AdminResponse::Created { grant, token } => {
-                output::issued_grant(&mut writer, &grant, token.expose())?;
+                output::issued_grant(&mut writer, &grant, token.expose(), theme)?;
                 return Ok(0);
             }
             AdminResponse::Extended { grant, token } => {
@@ -34,15 +37,15 @@ fn display_administration(mut request: Request) -> Result<i32> {
                     writer,
                     "Grant renewed. The previous token is no longer valid."
                 )?;
-                output::issued_grant(&mut writer, &grant, token.expose())?;
+                output::issued_grant(&mut writer, &grant, token.expose(), theme)?;
                 return Ok(0);
             }
             AdminResponse::Deleted { name } => {
-                writeln!(writer, "Deleted grant: {name}")?;
+                writeln!(writer, "Deleted grant: {}", theme.paint(Role::Name, &name))?;
                 return Ok(0);
             }
             AdminResponse::Grant(grant) => {
-                output::grant(&mut writer, &grant)?;
+                output::grant(&mut writer, &grant, theme)?;
                 return Ok(0);
             }
             AdminResponse::List {
@@ -51,7 +54,7 @@ fn display_administration(mut request: Request) -> Result<i32> {
             } => {
                 listed_grants.extend(grants);
                 let Some(cursor) = next_cursor else {
-                    output::list(&mut writer, &listed_grants, output::terminal_width())?;
+                    output::list(&mut writer, &listed_grants, output::terminal_width(), theme)?;
                     return Ok(0);
                 };
                 if !seen_cursors.insert(cursor.clone()) {
@@ -79,10 +82,22 @@ fn elevation_command(executable: &Path, token_stdin: bool, command: &[String]) -
 pub fn run() -> Result<i32> {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
-        Err(error) if error.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            ) =>
+        {
             // Opening the CLI without an operation is a successful request for
             // guidance. It must not authenticate, prompt for a token, or open storage.
-            write!(io::stdout().lock(), "{}", error.render())?;
+            let result = io::stdout()
+                .lock()
+                .write_all(Theme::stdout().help(&error.to_string()).as_bytes());
+            match result {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+                Err(error) => return Err(error.into()),
+            }
             return Ok(0);
         }
         Err(error) => error.exit(),

@@ -1,5 +1,6 @@
 //! Human-readable grants; credentials appear only on creation and renewal.
 
+use super::style::{Role, Theme};
 use crate::model::{AllowedExecutable, ArgumentPolicy, Grant};
 use std::io::{self, Write};
 
@@ -38,48 +39,111 @@ fn timestamp(value: f64) -> String {
     )
 }
 
-pub(super) fn issued_grant(writer: &mut impl Write, grant: &Grant, token: &str) -> io::Result<()> {
-    writeln!(writer, "delegated-sudo grant {}:", grant.name)?;
-    writeln!(writer, "- command: {}", scopes(grant))?;
-    writeln!(writer, "- dir: {}", directory(grant))?;
-    writeln!(writer, "- token: {token}")?;
-    writeln!(writer, "- expires: {}", timestamp(grant.expires_at))
-}
-
-pub(super) fn grant(writer: &mut impl Write, grant: &Grant) -> io::Result<()> {
-    writeln!(writer, "Name: {}", grant.name)?;
+pub(super) fn issued_grant(
+    writer: &mut impl Write,
+    grant: &Grant,
+    token: &str,
+    theme: Theme,
+) -> io::Result<()> {
     writeln!(
         writer,
-        "Commands: {}",
+        "{} {}:",
+        theme.paint(Role::Command, "delegated-sudo grant"),
+        theme.paint(Role::Name, &grant.name),
+    )?;
+    writeln!(
+        writer,
+        "{} {}",
+        theme.paint(Role::Heading, "- command:"),
+        scopes(grant, theme)
+    )?;
+    writeln!(
+        writer,
+        "{} {}",
+        theme.paint(Role::Heading, "- dir:"),
+        theme.paint(Role::Path, &directory(grant))
+    )?;
+    // Keep the credential itself unstyled so copying it never includes ANSI codes.
+    writeln!(writer, "{} {token}", theme.paint(Role::Heading, "- token:"))?;
+    writeln!(
+        writer,
+        "{} {}",
+        theme.paint(Role::Heading, "- expires:"),
+        theme.paint(Role::Value, &timestamp(grant.expires_at))
+    )
+}
+
+pub(super) fn grant(writer: &mut impl Write, grant: &Grant, theme: Theme) -> io::Result<()> {
+    writeln!(
+        writer,
+        "{} {}",
+        theme.paint(Role::Heading, "Name:"),
+        theme.paint(Role::Name, &grant.name)
+    )?;
+    writeln!(
+        writer,
+        "{} {}",
+        theme.paint(Role::Heading, "Commands:"),
         grant
             .allowed_executables
             .iter()
-            .map(|item| item.name.as_str())
+            .map(|item| theme.paint(Role::Command, &item.name))
             .collect::<Vec<_>>()
             .join(", ")
     )?;
-    writeln!(writer, "Directory: {}", directory(grant))?;
-    writeln!(writer, "Created: {}", timestamp(grant.created_at))?;
-    writeln!(writer, "Expires: {}", timestamp(grant.expires_at))?;
-    writeln!(writer, "Status: {}", status(grant))?;
+    writeln!(
+        writer,
+        "{} {}",
+        theme.paint(Role::Heading, "Directory:"),
+        theme.paint(Role::Path, &directory(grant))
+    )?;
+    writeln!(
+        writer,
+        "{} {}",
+        theme.paint(Role::Heading, "Created:"),
+        theme.paint(Role::Value, &timestamp(grant.created_at))
+    )?;
+    writeln!(
+        writer,
+        "{} {}",
+        theme.paint(Role::Heading, "Expires:"),
+        theme.paint(Role::Value, &timestamp(grant.expires_at))
+    )?;
+    writeln!(
+        writer,
+        "{} {}",
+        theme.paint(Role::Heading, "Status:"),
+        styled_status(grant, theme)
+    )?;
     for executable in &grant.allowed_executables {
-        writeln!(writer, "  {}: {}", executable.name, executable.path)?;
+        writeln!(
+            writer,
+            "  {}: {}",
+            theme.paint(Role::Command, &executable.name),
+            theme.paint(Role::Path, &executable.path)
+        )?;
         match &executable.argument_policy {
             ArgumentPolicy::Any => writeln!(
                 writer,
-                "    Scope: ANY arguments and subcommands (shell syntax rejected)"
+                "    {} {} arguments and subcommands (shell syntax rejected)",
+                theme.paint(Role::Heading, "Scope:"),
+                theme.paint(Role::Option, "ANY"),
             )?,
-            ArgumentPolicy::Exact(arguments) | ArgumentPolicy::Prefix(arguments) => {
-                let invocation = std::iter::once(executable.name.as_str())
-                    .chain(arguments.iter().map(String::as_str))
-                    .map(quote_argument)
-                    .collect::<Vec<_>>()
-                    .join(" ");
+            ArgumentPolicy::Exact(_) | ArgumentPolicy::Prefix(_) => {
+                let invocation = invocation(executable, theme);
                 match &executable.argument_policy {
-                    ArgumentPolicy::Exact(_) => writeln!(writer, "    Scope: EXACT {invocation}")?,
+                    ArgumentPolicy::Exact(_) => writeln!(
+                        writer,
+                        "    {} {} {invocation}",
+                        theme.paint(Role::Heading, "Scope:"),
+                        theme.paint(Role::Option, "EXACT")
+                    )?,
                     ArgumentPolicy::Prefix(_) => writeln!(
                         writer,
-                        "    Scope: PREFIX {invocation} * (additional arguments allowed)"
+                        "    {} {} {invocation} {} (additional arguments allowed)",
+                        theme.paint(Role::Heading, "Scope:"),
+                        theme.paint(Role::Option, "PREFIX"),
+                        theme.paint(Role::Option, "*"),
                     )?,
                     ArgumentPolicy::Any => unreachable!(),
                 }
@@ -99,27 +163,53 @@ fn status(grant: &Grant) -> &'static str {
     }
 }
 
-fn scope(executable: &AllowedExecutable) -> String {
+fn styled_status(grant: &Grant, theme: Theme) -> String {
+    let role = if grant.revoked {
+        Role::Error
+    } else if grant.active {
+        Role::Success
+    } else {
+        Role::Warning
+    };
+    theme.paint(role, status(grant))
+}
+
+fn invocation(executable: &AllowedExecutable, theme: Theme) -> String {
     let arguments = match &executable.argument_policy {
         ArgumentPolicy::Any => &[][..],
         ArgumentPolicy::Exact(arguments) | ArgumentPolicy::Prefix(arguments) => arguments,
     };
-    let mut command = std::iter::once(executable.name.as_str())
-        .chain(arguments.iter().map(String::as_str))
-        .map(quote_argument)
-        .collect::<Vec<_>>()
-        .join(" ");
+    let mut parts = vec![theme.paint(Role::Command, &quote_argument(&executable.name))];
+    parts.extend(arguments.iter().map(|argument| {
+        let role = if argument.starts_with('-') {
+            Role::Option
+        } else if argument.starts_with('/')
+            || argument.starts_with("./")
+            || argument.starts_with("../")
+        {
+            Role::Path
+        } else {
+            Role::Value
+        };
+        theme.paint(role, &quote_argument(argument))
+    }));
+    parts.join(" ")
+}
+
+fn scope(executable: &AllowedExecutable, theme: Theme) -> String {
+    let mut command = invocation(executable, theme);
     if !matches!(executable.argument_policy, ArgumentPolicy::Exact(_)) {
-        command.push_str(" *");
+        command.push(' ');
+        command.push_str(&theme.paint(Role::Option, "*"));
     }
     command
 }
 
-fn scopes(grant: &Grant) -> String {
+fn scopes(grant: &Grant, theme: Theme) -> String {
     grant
         .allowed_executables
         .iter()
-        .map(scope)
+        .map(|executable| scope(executable, theme))
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -145,11 +235,24 @@ pub(super) fn terminal_width() -> usize {
     100
 }
 
-pub(super) fn list(writer: &mut impl Write, grants: &[Grant], width: usize) -> io::Result<()> {
+pub(super) fn list(
+    writer: &mut impl Write,
+    grants: &[Grant],
+    width: usize,
+    theme: Theme,
+) -> io::Result<()> {
     if grants.is_empty() {
-        return writeln!(writer, "No delegation grants.");
+        return writeln!(
+            writer,
+            "{}",
+            theme.paint(Role::Muted, "No delegation grants.")
+        );
     }
-    let commands: Vec<_> = grants.iter().map(scopes).collect();
+    // Width calculations use plain values; ANSI escapes must not shift columns.
+    let commands: Vec<_> = grants
+        .iter()
+        .map(|grant| scopes(grant, Theme::plain()))
+        .collect();
     let show_directory = grants.iter().any(|grant| grant.directory.is_some());
     let directories: Vec<_> = grants.iter().map(directory).collect();
     let directory_width = directories.iter().map(String::len).max().unwrap().max(3);
@@ -182,13 +285,12 @@ pub(super) fn list(writer: &mut impl Write, grants: &[Grant], width: usize) -> i
         } else {
             String::new()
         };
-        writeln!(
-            writer,
+        let header = format!(
             "{:name_width$}  {:command_width$}{directory_header}  {:19}  STATUS",
             "NAME", "COMMAND", "EXPIRES (UTC)"
-        )?;
-        writeln!(
-            writer,
+        );
+        writeln!(writer, "{}", theme.paint(Role::Heading, &header))?;
+        let separator = format!(
             "{}  {}{}  {}  {}",
             "─".repeat(name_width),
             "─".repeat(command_width),
@@ -199,20 +301,27 @@ pub(super) fn list(writer: &mut impl Write, grants: &[Grant], width: usize) -> i
             },
             "─".repeat(19),
             "─".repeat(7)
-        )?;
+        );
+        writeln!(writer, "{}", theme.paint(Role::Muted, &separator))?;
         for ((grant, command), directory) in grants.iter().zip(&commands).zip(&directories) {
             let expires = timestamp(grant.expires_at);
             let expires = expires.strip_suffix(" UTC").unwrap_or(&expires);
             let directory_cell = if show_directory {
-                format!("  {directory:directory_width$}")
+                format!(
+                    "  {}",
+                    theme.paint(Role::Path, &format!("{directory:directory_width$}"))
+                )
             } else {
                 String::new()
             };
             writeln!(
                 writer,
-                "{:name_width$}  {command:command_width$}{directory_cell}  {expires:19}  {}",
-                grant.name,
-                status(grant)
+                "{}  {}{}{directory_cell}  {}  {}",
+                theme.paint(Role::Name, &format!("{:name_width$}", grant.name)),
+                scopes(grant, theme),
+                " ".repeat(command_width - command.len()),
+                theme.paint(Role::Value, &format!("{expires:19}")),
+                styled_status(grant, theme),
             )?;
         }
     } else {
@@ -220,14 +329,34 @@ pub(super) fn list(writer: &mut impl Write, grants: &[Grant], width: usize) -> i
             if index > 0 {
                 writeln!(writer)?;
             }
-            writeln!(writer, "{}  [{}]", grant.name, status(grant))?;
+            writeln!(
+                writer,
+                "{}  [{}]",
+                theme.paint(Role::Name, &grant.name),
+                styled_status(grant, theme)
+            )?;
             for executable in &grant.allowed_executables {
-                writeln!(writer, "  Command: {}", scope(executable))?;
+                writeln!(
+                    writer,
+                    "  {} {}",
+                    theme.paint(Role::Heading, "Command:"),
+                    scope(executable, theme)
+                )?;
             }
             if show_directory {
-                writeln!(writer, "  Directory: {}", directory(grant))?;
+                writeln!(
+                    writer,
+                    "  {} {}",
+                    theme.paint(Role::Heading, "Directory:"),
+                    theme.paint(Role::Path, &directory(grant))
+                )?;
             }
-            writeln!(writer, "  Expires: {}", timestamp(grant.expires_at))?;
+            writeln!(
+                writer,
+                "  {} {}",
+                theme.paint(Role::Heading, "Expires:"),
+                theme.paint(Role::Value, &timestamp(grant.expires_at))
+            )?;
         }
     }
     Ok(())
@@ -236,6 +365,33 @@ pub(super) fn list(writer: &mut impl Write, grants: &[Grant], width: usize) -> i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strip_styles(value: &str) -> String {
+        let mut plain = String::new();
+        let mut characters = value.chars();
+        while let Some(character) = characters.next() {
+            if character == '\x1b' {
+                assert_eq!(characters.next(), Some('['));
+                for control in characters.by_ref() {
+                    if ('@'..='~').contains(&control) {
+                        break;
+                    }
+                }
+            } else {
+                plain.push(character);
+            }
+        }
+        plain
+    }
+
+    fn assert_only_styles_changed(plain: Vec<u8>, colored: Vec<u8>) -> String {
+        let plain = String::from_utf8(plain).unwrap();
+        let colored = String::from_utf8(colored).unwrap();
+        assert!(!plain.contains('\x1b'));
+        assert!(colored.contains("\x1b["));
+        assert_eq!(strip_styles(&colored), plain);
+        colored
+    }
 
     fn record(name: &str, argument_policy: ArgumentPolicy) -> Grant {
         Grant {
@@ -260,7 +416,7 @@ mod tests {
             ArgumentPolicy::Prefix(vec!["compose".into()]),
         );
         let mut output = Vec::new();
-        issued_grant(&mut output, &grant, "test-credential").unwrap();
+        issued_grant(&mut output, &grant, "test-credential", Theme::plain()).unwrap();
         assert_eq!(
             String::from_utf8(output).unwrap(),
             concat!(
@@ -290,7 +446,7 @@ mod tests {
             argument_policy: ArgumentPolicy::Any,
         });
         let mut output = Vec::new();
-        issued_grant(&mut output, &grant, "test-credential").unwrap();
+        issued_grant(&mut output, &grant, "test-credential", Theme::plain()).unwrap();
         assert_eq!(
             String::from_utf8(output).unwrap(),
             concat!(
@@ -317,7 +473,7 @@ mod tests {
                 recursive,
             });
             let mut output = Vec::new();
-            issued_grant(&mut output, &grant, "test-credential").unwrap();
+            issued_grant(&mut output, &grant, "test-credential", Theme::plain()).unwrap();
             assert_eq!(
                 String::from_utf8(output).unwrap(),
                 format!(
@@ -325,7 +481,7 @@ mod tests {
                 )
             );
             let mut output = Vec::new();
-            super::grant(&mut output, &grant).unwrap();
+            super::grant(&mut output, &grant, Theme::plain()).unwrap();
             let output = String::from_utf8(output).unwrap();
             assert!(output.contains(&format!("Directory: {displayed}\n")));
             assert!(!output.contains("token:") && !output.contains("inode"));
@@ -341,7 +497,7 @@ mod tests {
         });
         let grants = [scoped, record("unrestricted", ArgumentPolicy::Any)];
         let mut output = Vec::new();
-        list(&mut output, &grants, 120).unwrap();
+        list(&mut output, &grants, 120, Theme::plain()).unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.lines().next().unwrap().contains("DIR"));
         assert!(
@@ -356,7 +512,7 @@ mod tests {
         );
 
         let mut output = Vec::new();
-        list(&mut output, &grants, 40).unwrap();
+        list(&mut output, &grants, 40, Theme::plain()).unwrap();
         assert_eq!(
             String::from_utf8(output).unwrap(),
             concat!(
@@ -384,7 +540,13 @@ mod tests {
         let mut revoked = record("revoked", ArgumentPolicy::Any);
         revoked.revoked = true;
         let mut output = Vec::new();
-        list(&mut output, &[active, expired, revoked], 100).unwrap();
+        list(
+            &mut output,
+            &[active, expired, revoked],
+            100,
+            Theme::plain(),
+        )
+        .unwrap();
         let output = String::from_utf8(output).unwrap();
         assert_eq!(
             output,
@@ -407,7 +569,13 @@ mod tests {
         );
         for width in [40, 100] {
             let mut output = Vec::new();
-            list(&mut output, std::slice::from_ref(&record), width).unwrap();
+            list(
+                &mut output,
+                std::slice::from_ref(&record),
+                width,
+                Theme::plain(),
+            )
+            .unwrap();
             assert_eq!(
                 String::from_utf8(output).unwrap(),
                 concat!(
@@ -422,7 +590,7 @@ mod tests {
     #[test]
     fn empty_list_has_a_clear_message() {
         let mut output = Vec::new();
-        list(&mut output, &[], 80).unwrap();
+        list(&mut output, &[], 80, Theme::plain()).unwrap();
         assert_eq!(output, b"No delegation grants.\n");
     }
 
@@ -458,10 +626,73 @@ mod tests {
                 directory: None,
             };
             let mut output = Vec::new();
-            grant(&mut output, &record).unwrap();
+            grant(&mut output, &record, Theme::plain()).unwrap();
             let output = String::from_utf8(output).unwrap();
             assert!(output.contains(expected));
             assert!(!output.contains("Token:"));
         }
+    }
+
+    #[test]
+    fn colors_preserve_issued_and_detailed_values_without_styling_credentials() {
+        let mut record = record(
+            "Docker Compose Кодекс",
+            ArgumentPolicy::Prefix(vec![
+                "compose".into(),
+                "--file".into(),
+                "/srv/my project/compose.yml".into(),
+                "don't".into(),
+                "".into(),
+            ]),
+        );
+        record.directory = Some(crate::model::DirectoryScope {
+            path: "/srv/my project".into(),
+            recursive: true,
+        });
+        let token = "test-only-credential";
+        let mut plain = Vec::new();
+        let mut colored = Vec::new();
+        issued_grant(&mut plain, &record, token, Theme::plain()).unwrap();
+        issued_grant(&mut colored, &record, token, Theme::new(true)).unwrap();
+        let colored = assert_only_styles_changed(plain, colored);
+        assert_eq!(colored.matches(token).count(), 1);
+        assert!(colored.contains(&format!(" {token}\n")));
+
+        let mut plain = Vec::new();
+        let mut colored = Vec::new();
+        grant(&mut plain, &record, Theme::plain()).unwrap();
+        grant(&mut colored, &record, Theme::new(true)).unwrap();
+        let colored = assert_only_styles_changed(plain, colored);
+        assert!(!colored.contains(token));
+    }
+
+    #[test]
+    fn colors_preserve_table_alignment_and_narrow_or_unicode_layouts() {
+        let mut active = record(
+            "compose",
+            ArgumentPolicy::Prefix(vec!["compose".into(), "--file".into(), "app.yml".into()]),
+        );
+        active.directory = Some(crate::model::DirectoryScope {
+            path: "/srv/app".into(),
+            recursive: true,
+        });
+        let mut expired = record("expired", ArgumentPolicy::Exact(vec!["ps".into()]));
+        expired.active = false;
+        let mut revoked = record("revoked", ArgumentPolicy::Any);
+        revoked.revoked = true;
+        let ascii = [active, expired, revoked];
+        for width in [40, 160] {
+            let mut plain = Vec::new();
+            let mut colored = Vec::new();
+            list(&mut plain, &ascii, width, Theme::plain()).unwrap();
+            list(&mut colored, &ascii, width, Theme::new(true)).unwrap();
+            assert_only_styles_changed(plain, colored);
+        }
+        let unicode = [record("Docker Compose Кодекс", ArgumentPolicy::Any)];
+        let mut plain = Vec::new();
+        let mut colored = Vec::new();
+        list(&mut plain, &unicode, 160, Theme::plain()).unwrap();
+        list(&mut colored, &unicode, 160, Theme::new(true)).unwrap();
+        assert_only_styles_changed(plain, colored);
     }
 }

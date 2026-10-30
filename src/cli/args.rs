@@ -124,6 +124,9 @@ HELP (no sudo required)
   delegated-sudo -h           Show this complete guide.
   delegated-sudo help         Show this complete guide.
   delegated-sudo --version    Show the installed version (also -V).
+
+  Help and grant output use colors in a terminal. Set NO_COLOR=1 to disable.
+  Redirected output remains plain text.
 "#;
 
 #[derive(Debug, Parser)]
@@ -229,7 +232,11 @@ fn read_command() -> io::Result<Vec<String>> {
         stdout,
         "Enter a command; a final * permits additional arguments."
     )?;
-    write!(stdout, "Command: ")?;
+    write!(
+        stdout,
+        "{} ",
+        super::style::Theme::stdout().paint(super::style::Role::Heading, "Command:")
+    )?;
     stdout.flush()?;
     let mut line = String::new();
     if io::stdin().read_line(&mut line)? == 0 {
