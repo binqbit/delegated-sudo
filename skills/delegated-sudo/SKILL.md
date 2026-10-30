@@ -57,11 +57,12 @@ installed version without `--recursive`, the equivalent `--dir '/srv/app/*'`
 is supported: quote the whole path. Never give the user a bare shell star; it
 may become filenames before delegated-sudo starts.
 
-For interactive command entry, give the user the launch command and prompt input
-separately:
+For interactive command entry with the same directory-tree scope, give the user
+the launch command and prompt input separately. The quoted path also works with
+versions that lack `--recursive`:
 
 ```bash
-sudo delegated-sudo grant create compose-codex --ttl 1d --dir /srv/app
+sudo delegated-sudo grant create compose-codex --ttl 1d --dir '/srv/app/*'
 ```
 
 Then enter at `Command:`:
