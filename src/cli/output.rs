@@ -41,6 +41,7 @@ fn timestamp(value: f64) -> String {
 pub(super) fn issued_grant(writer: &mut impl Write, grant: &Grant, token: &str) -> io::Result<()> {
     writeln!(writer, "delegated-sudo grant {}:", grant.name)?;
     writeln!(writer, "- command: {}", scopes(grant))?;
+    writeln!(writer, "- dir: {}", directory(grant))?;
     writeln!(writer, "- token: {token}")?;
     writeln!(writer, "- expires: {}", timestamp(grant.expires_at))
 }
@@ -57,6 +58,7 @@ pub(super) fn grant(writer: &mut impl Write, grant: &Grant) -> io::Result<()> {
             .collect::<Vec<_>>()
             .join(", ")
     )?;
+    writeln!(writer, "Directory: {}", directory(grant))?;
     writeln!(writer, "Created: {}", timestamp(grant.created_at))?;
     writeln!(writer, "Expires: {}", timestamp(grant.expires_at))?;
     writeln!(writer, "Status: {}", status(grant))?;
@@ -122,6 +124,14 @@ fn scopes(grant: &Grant) -> String {
         .join(", ")
 }
 
+fn directory(grant: &Grant) -> String {
+    match &grant.directory {
+        Some(scope) if scope.recursive => format!("{}/*", scope.path.trim_end_matches('/')),
+        Some(scope) => scope.path.clone(),
+        None => "any".into(),
+    }
+}
+
 pub(super) fn terminal_width() -> usize {
     let mut size = std::mem::MaybeUninit::<libc::winsize>::uninit();
     // SAFETY: ioctl writes a winsize into valid storage on success.
@@ -140,6 +150,9 @@ pub(super) fn list(writer: &mut impl Write, grants: &[Grant], width: usize) -> i
         return writeln!(writer, "No delegation grants.");
     }
     let commands: Vec<_> = grants.iter().map(scopes).collect();
+    let show_directory = grants.iter().any(|grant| grant.directory.is_some());
+    let directories: Vec<_> = grants.iter().map(directory).collect();
+    let directory_width = directories.iter().map(String::len).max().unwrap().max(3);
     let name_width = grants
         .iter()
         .map(|grant| grant.name.len())
@@ -149,29 +162,55 @@ pub(super) fn list(writer: &mut impl Write, grants: &[Grant], width: usize) -> i
     let command_width = commands.iter().map(String::len).max().unwrap().max(7);
     // ASCII has predictable terminal width. Use labeled rows for long or
     // Unicode values so names and scopes stay complete without misaligned columns.
-    let table = name_width + command_width + 19 + 7 + 6 <= width
+    let table = name_width
+        + command_width
+        + 19
+        + 7
+        + 6
+        + if show_directory {
+            directory_width + 2
+        } else {
+            0
+        }
+        <= width
         && grants.iter().all(|grant| grant.name.is_ascii())
-        && commands.iter().all(|command| command.is_ascii());
+        && commands.iter().all(|command| command.is_ascii())
+        && directories.iter().all(|directory| directory.is_ascii());
     if table {
+        let directory_header = if show_directory {
+            format!("  {:directory_width$}", "DIR")
+        } else {
+            String::new()
+        };
         writeln!(
             writer,
-            "{:name_width$}  {:command_width$}  {:19}  STATUS",
+            "{:name_width$}  {:command_width$}{directory_header}  {:19}  STATUS",
             "NAME", "COMMAND", "EXPIRES (UTC)"
         )?;
         writeln!(
             writer,
-            "{}  {}  {}  {}",
+            "{}  {}{}  {}  {}",
             "─".repeat(name_width),
             "─".repeat(command_width),
+            if show_directory {
+                format!("  {}", "─".repeat(directory_width))
+            } else {
+                String::new()
+            },
             "─".repeat(19),
             "─".repeat(7)
         )?;
-        for (grant, command) in grants.iter().zip(&commands) {
+        for ((grant, command), directory) in grants.iter().zip(&commands).zip(&directories) {
             let expires = timestamp(grant.expires_at);
             let expires = expires.strip_suffix(" UTC").unwrap_or(&expires);
+            let directory_cell = if show_directory {
+                format!("  {directory:directory_width$}")
+            } else {
+                String::new()
+            };
             writeln!(
                 writer,
-                "{:name_width$}  {command:command_width$}  {expires:19}  {}",
+                "{:name_width$}  {command:command_width$}{directory_cell}  {expires:19}  {}",
                 grant.name,
                 status(grant)
             )?;
@@ -184,6 +223,9 @@ pub(super) fn list(writer: &mut impl Write, grants: &[Grant], width: usize) -> i
             writeln!(writer, "{}  [{}]", grant.name, status(grant))?;
             for executable in &grant.allowed_executables {
                 writeln!(writer, "  Command: {}", scope(executable))?;
+            }
+            if show_directory {
+                writeln!(writer, "  Directory: {}", directory(grant))?;
             }
             writeln!(writer, "  Expires: {}", timestamp(grant.expires_at))?;
         }
@@ -207,6 +249,7 @@ mod tests {
             expires_at: 60.0,
             revoked: false,
             active: true,
+            directory: None,
         }
     }
 
@@ -223,6 +266,7 @@ mod tests {
             concat!(
                 "delegated-sudo grant compose-codex:\n",
                 "- command: docker compose *\n",
+                "- dir: any\n",
                 "- token: test-credential\n",
                 "- expires: 1970-01-01 00:01:00 UTC\n",
             )
@@ -252,8 +296,79 @@ mod tests {
             concat!(
                 "delegated-sudo grant Docker Compose::\n",
                 "- command: docker compose --file 'a b.yml' up, systemctl *\n",
+                "- dir: any\n",
                 "- token: test-credential\n",
                 "- expires: 1970-01-01 00:01:00 UTC\n",
+            )
+        );
+    }
+
+    #[test]
+    fn directory_scope_is_explicit_in_issued_and_detailed_grants() {
+        for (path, recursive, displayed) in [
+            ("/srv/app", false, "/srv/app"),
+            ("/srv/app", true, "/srv/app/*"),
+            ("/", true, "/*"),
+            ("/srv/my app", true, "/srv/my app/*"),
+        ] {
+            let mut grant = record("project", ArgumentPolicy::Prefix(vec!["compose".into()]));
+            grant.directory = Some(crate::model::DirectoryScope {
+                path: path.into(),
+                recursive,
+            });
+            let mut output = Vec::new();
+            issued_grant(&mut output, &grant, "test-credential").unwrap();
+            assert_eq!(
+                String::from_utf8(output).unwrap(),
+                format!(
+                    "delegated-sudo grant project:\n- command: docker compose *\n- dir: {displayed}\n- token: test-credential\n- expires: 1970-01-01 00:01:00 UTC\n"
+                )
+            );
+            let mut output = Vec::new();
+            super::grant(&mut output, &grant).unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains(&format!("Directory: {displayed}\n")));
+            assert!(!output.contains("token:") && !output.contains("inode"));
+        }
+    }
+
+    #[test]
+    fn mixed_list_keeps_directory_scope_visible_in_table_and_narrow_rows() {
+        let mut scoped = record("project", ArgumentPolicy::Any);
+        scoped.directory = Some(crate::model::DirectoryScope {
+            path: "/srv/app".into(),
+            recursive: true,
+        });
+        let grants = [scoped, record("unrestricted", ArgumentPolicy::Any)];
+        let mut output = Vec::new();
+        list(&mut output, &grants, 120).unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.lines().next().unwrap().contains("DIR"));
+        assert!(
+            output
+                .lines()
+                .any(|line| line.starts_with("project ") && line.contains("/srv/app/*"))
+        );
+        assert!(
+            output
+                .lines()
+                .any(|line| line.starts_with("unrestricted ") && line.contains("any"))
+        );
+
+        let mut output = Vec::new();
+        list(&mut output, &grants, 40).unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            concat!(
+                "project  [active]\n",
+                "  Command: docker *\n",
+                "  Directory: /srv/app/*\n",
+                "  Expires: 1970-01-01 00:01:00 UTC\n",
+                "\n",
+                "unrestricted  [active]\n",
+                "  Command: docker *\n",
+                "  Directory: any\n",
+                "  Expires: 1970-01-01 00:01:00 UTC\n",
             )
         );
     }
@@ -340,6 +455,7 @@ mod tests {
                 expires_at: 60.0,
                 revoked: false,
                 active: true,
+                directory: None,
             };
             let mut output = Vec::new();
             grant(&mut output, &record).unwrap();

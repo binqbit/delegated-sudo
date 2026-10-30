@@ -2,6 +2,7 @@
 //! Tokens stay inside captured process output and are never printed here.
 
 mod authorization;
+mod directories;
 mod exact;
 mod execution;
 mod grants;
@@ -31,6 +32,8 @@ fn acceptance() -> Result<()> {
     };
     storage::legacy_upgrade(&harness)?;
     println!("passed: on-disk legacy upgrade retires old tokens and preserves new named grants");
+    storage::named_upgrade(&harness)?;
+    println!("passed: named-grant directory upgrade preserves existing tokens and permissions");
     let main = harness.create("id,cat,delegated-sudo-check", "60m")?;
     grants::administration(&harness, &main)?;
     println!("passed: administrative authorization and inspection");
@@ -52,6 +55,8 @@ fn acceptance() -> Result<()> {
     println!("passed: exact command arguments, order, empty values and pinned path");
     prefix::command(&harness)?;
     println!("passed: fixed argument prefixes with optional suffixes and shell-syntax rejection");
+    directories::restrictions(&harness)?;
+    println!("passed: exact/subtree working directories, path escapes, replacement and renewal");
     terminal::interactive_creation(&harness)?;
     println!(
         "passed: interactive creation preserves bare star and quoted arguments without glob expansion"

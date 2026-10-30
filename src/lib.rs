@@ -3,6 +3,7 @@ pub mod cli;
 pub mod model;
 
 mod credentials;
+mod directories;
 mod executables;
 mod execution;
 mod input_policy;

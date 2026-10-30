@@ -14,6 +14,7 @@ fn record(argument_policy: ArgumentPolicy) -> StoredGrant {
             path: "/nix/store/example/bin/docker".into(),
             argument_policy,
         }],
+        directory: None,
         created_at: 1000.0,
         expires_at: 1060.0,
         revoked: false,
@@ -126,6 +127,7 @@ fn shell_grammar_is_rejected_at_creation_and_execution_boundaries() {
                     &store,
                     "invalid".into(),
                     record(argument_policy).allowed_executables,
+                    None,
                     60,
                     1000.0
                 )
@@ -175,6 +177,7 @@ fn persisted_argument_policies_keep_their_authorization_scope() {
             &store,
             format!("test-{index}"),
             record(mode).allowed_executables,
+            None,
             60,
             1000.0,
         )

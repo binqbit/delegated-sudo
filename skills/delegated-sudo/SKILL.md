@@ -43,7 +43,14 @@ Do not pass the whole invocation as one quoted string. In shell-based tools,
 quote each argument that needs it: `'release candidate'` is one argument, while
 `release candidate` is two. Prefer an argument array when the tool supports one.
 
-Run from the intended working directory; the command inherits it.
+Run from the intended working directory; the command inherits it. Read the grant's
+`- dir:` field (or `Directory:` in inspection): use that exact directory, or the
+root and any descendant when its scope ends in `/*`. `any` means no grant directory
+restriction. The wrapper refuses outside locations after resolving symlinks and
+`..`; it does not change directories for you. A directory restriction covers only
+the initial working directory, not the files or paths the program may access.
+Keep those effects within the user's permission. If the recorded root directory
+was replaced, request a new grant; renewal keeps the original directory binding.
 
 Do not append shell chains, substitutions, or a shell wrapper to obtain additional
 execution.

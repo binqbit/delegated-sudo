@@ -18,6 +18,7 @@ fn create(store: &storage::Store, timestamp: f64) -> (Grant, credentials::Secret
         store,
         format!("test-{}", timestamp),
         allowed(),
+        None,
         60,
         timestamp,
     )
@@ -123,6 +124,58 @@ fn renewal_rotates_tokens_and_sets_a_new_deadline_from_now() {
 }
 
 #[test]
+fn renewal_preserves_the_directory_restriction_and_stored_identity() {
+    let store = storage::Store::in_memory();
+    let directory = crate::directories::StoredDirectory {
+        scope: crate::model::DirectoryScope {
+            path: "/project".into(),
+            recursive: true,
+        },
+        device: 1,
+        inode: 2,
+    };
+    let serialized = serde_json::to_string(&directory).unwrap();
+    let AdminResponse::Created {
+        grant,
+        token: old_token,
+    } = application::create_grant(
+        &store,
+        "scoped".into(),
+        allowed(),
+        Some(directory),
+        60,
+        1000.0,
+    )
+    .unwrap()
+    else {
+        panic!("unexpected creation result")
+    };
+    assert_eq!(grant.directory.as_ref().unwrap().path, "/project");
+    let AdminResponse::Extended {
+        grant: renewed,
+        token,
+    } = application::dispatch(
+        &store,
+        Request::Extend {
+            name: grant.name.clone(),
+            ttl: "30d".into(),
+        },
+        2000.0,
+    )
+    .unwrap()
+    else {
+        panic!("unexpected renewal result")
+    };
+    assert_eq!(renewed.directory, grant.directory);
+    let saved = store.find_hash(&token.hash()).unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_string(saved.directory.as_ref().unwrap()).unwrap(),
+        serialized
+    );
+    assert!(store.find_hash(&old_token.hash()).unwrap().is_none());
+}
+
+#[test]
 fn invalid_renewal_leaves_the_token_and_deadline_unchanged() {
     let store = storage::Store::in_memory();
     let (grant, token) = create(&store, 1000.0);
@@ -176,7 +229,7 @@ fn invalid_renewal_leaves_the_token_and_deadline_unchanged() {
 fn unique_names_are_required_and_duplicate_creation_preserves_the_original() {
     let store = storage::Store::in_memory();
     let (grant, token) = create(&store, 1000.0);
-    let error = application::create_grant(&store, grant.name.clone(), allowed(), 100, 1100.0)
+    let error = application::create_grant(&store, grant.name.clone(), allowed(), None, 100, 1100.0)
         .err()
         .unwrap();
     assert!(error.to_string().contains("already exists"));
@@ -195,7 +248,9 @@ fn unique_names_are_required_and_duplicate_creation_preserves_the_original() {
         "escape\x1b",
         "hidden\u{202e}",
     ] {
-        assert!(application::create_grant(&store, name.into(), allowed(), 60, 1000.0).is_err());
+        assert!(
+            application::create_grant(&store, name.into(), allowed(), None, 60, 1000.0).is_err()
+        );
     }
     assert!(policy::validate_name(&"a".repeat(81)).is_err());
     assert!(policy::validate_name(&"і".repeat(80)).is_ok());
@@ -206,7 +261,7 @@ fn unique_names_are_required_and_duplicate_creation_preserves_the_original() {
         "Case",
         "case",
     ] {
-        application::create_grant(&store, name.into(), allowed(), 60, 1000.0).unwrap();
+        application::create_grant(&store, name.into(), allowed(), None, 60, 1000.0).unwrap();
         assert_eq!(store.find(name).unwrap().name, name);
     }
 }
@@ -238,7 +293,8 @@ fn deletion_removes_expired_or_active_grants_and_invalidates_tokens() {
 fn list_paginates_without_losing_or_repeating_records() {
     let store = storage::Store::in_memory();
     for index in 0..205 {
-        application::create_grant(&store, format!("test-{index}"), allowed(), 60, 1000.0).unwrap();
+        application::create_grant(&store, format!("test-{index}"), allowed(), None, 60, 1000.0)
+            .unwrap();
     }
     let mut cursor = None;
     let mut ids = std::collections::HashSet::new();
@@ -269,7 +325,9 @@ fn oversized_grant_is_rejected_before_persistence() {
         path: "/nix/store/example-coreutils/bin/id".into(),
         argument_policy: ArgumentPolicy::Exact(vec!["x".repeat(64 * 1024)]),
     }];
-    assert!(application::create_grant(&store, "oversized".into(), commands, 60, 1000.0).is_err());
+    assert!(
+        application::create_grant(&store, "oversized".into(), commands, None, 60, 1000.0).is_err()
+    );
     assert!(store.page(None).unwrap().is_empty());
 }
 

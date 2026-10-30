@@ -1,6 +1,7 @@
 //! Coordinate root authorization, grant policy, persistence, and execution.
 
 use crate::credentials::{self, SecretToken};
+use crate::directories::{self, StoredDirectory};
 use crate::executables;
 use crate::execution;
 use crate::input_policy;
@@ -39,6 +40,7 @@ pub(crate) fn create_grant(
     store: &Store,
     name: String,
     allowed: Vec<AllowedExecutable>,
+    directory: Option<StoredDirectory>,
     seconds: u64,
     timestamp: f64,
 ) -> Result<AdminResponse> {
@@ -55,6 +57,7 @@ pub(crate) fn create_grant(
     let record = StoredGrant {
         name,
         allowed_executables: allowed,
+        directory,
         created_at: timestamp,
         expires_at: timestamp + seconds as f64,
         revoked: false,
@@ -102,6 +105,7 @@ pub(crate) fn dispatch(store: &Store, request: Request, timestamp: f64) -> Resul
             name,
             commands,
             ttl,
+            directory,
         } => {
             policy::validate_name(&name)?;
             let seconds = policy::parse_ttl(&ttl)?;
@@ -109,6 +113,7 @@ pub(crate) fn dispatch(store: &Store, request: Request, timestamp: f64) -> Resul
                 store,
                 name,
                 executables::resolve_commands(&commands)?,
+                directory.as_deref().map(directories::resolve).transpose()?,
                 seconds,
                 timestamp,
             )
@@ -118,13 +123,15 @@ pub(crate) fn dispatch(store: &Store, request: Request, timestamp: f64) -> Resul
             command,
             arguments,
             ttl,
+            directory,
         } => {
             policy::validate_name(&name)?;
             let seconds = policy::parse_ttl(&ttl)?;
             input_policy::invocation(&command, &arguments)?;
             let mut allowed = executables::resolve_commands(&[command])?;
             allowed[0].argument_policy = policy::argument_policy(arguments);
-            create_grant(store, name, allowed, seconds, timestamp)
+            let directory = directory.as_deref().map(directories::resolve).transpose()?;
+            create_grant(store, name, allowed, directory, seconds, timestamp)
         }
         Request::List { cursor } => list_grants(store, cursor.as_deref(), timestamp),
         Request::Show { name } => {
@@ -177,10 +184,12 @@ pub fn execute(
         .ok_or(GrantError("Invalid or inactive delegation token"))?;
     let allowed = policy::authorize(&record, command, arguments, now()?)?;
     executables::validate_executable(Path::new(&allowed.path))?;
+    let directory = directories::authorize(record.directory.as_ref())?;
     // The root lock spans the complete lookup/authorize/validate/exec sequence.
     Ok(execution::replace(
         &allowed,
         arguments,
+        directory,
         store.into_exec_lock(),
     )?)
 }

@@ -44,6 +44,9 @@ pub(super) enum GrantCommand {
         /// Lifetime from now, such as 60m or 30d (maximum 30 days).
         #[arg(long)]
         ttl: String,
+        /// Permit this directory only, or PATH/* for it and all descendants.
+        #[arg(long = "dir", value_name = "PATH")]
+        directory: Option<String>,
         /// Command after --; omit to enter it interactively with a literal final *.
         #[arg(last = true, num_args = 1.., value_name = "COMMAND")]
         command: Vec<String>,
@@ -108,16 +111,19 @@ impl GrantCommand {
                 name,
                 commands: Some(commands),
                 ttl,
+                directory,
                 ..
             } => Request::Create {
                 name,
                 commands: commands.split(',').map(String::from).collect(),
                 ttl,
+                directory,
             },
             GrantCommand::Create {
                 name,
                 commands: None,
                 ttl,
+                directory,
                 mut command,
             } => {
                 if command.is_empty() {
@@ -131,6 +137,7 @@ impl GrantCommand {
                         .expect("command input must contain an executable"),
                     arguments: command.collect(),
                     ttl,
+                    directory,
                 }
             }
             GrantCommand::List => Request::List { cursor: None },
@@ -214,6 +221,7 @@ mod tests {
             command,
             arguments,
             ttl,
+            directory,
         } = operation.into_request().unwrap()
         else {
             panic!("wrong scope")
@@ -227,6 +235,107 @@ mod tests {
             ]
         );
         assert_eq!(ttl, "60m");
+        assert!(directory.is_none());
+    }
+
+    #[test]
+    fn directory_scope_is_optional_and_does_not_consume_command_flags() {
+        for path in ["/srv/app", "/srv/app/*", "/srv/project with spaces/*"] {
+            let parsed = Cli::try_parse_from([
+                "delegated-sudo",
+                "grant",
+                "create",
+                "project",
+                "--ttl",
+                "30d",
+                "--dir",
+                path,
+                "--",
+                "docker",
+                "compose",
+                "--dir",
+                "command-option",
+                "*",
+            ])
+            .unwrap();
+            let Action::Grant { operation } = parsed.action else {
+                panic!("wrong action")
+            };
+            let Request::CreateCommand {
+                directory,
+                arguments,
+                ..
+            } = operation.into_request().unwrap()
+            else {
+                panic!("wrong scope")
+            };
+            assert_eq!(directory.as_deref(), Some(path));
+            assert_eq!(arguments, ["compose", "--dir", "command-option", "*"]);
+        }
+        assert!(
+            Cli::try_parse_from([
+                "delegated-sudo",
+                "grant",
+                "create",
+                "project",
+                "--ttl",
+                "30d",
+                "--dir",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn broad_and_interactive_creation_accept_directory_scope() {
+        let parsed = Cli::try_parse_from([
+            "delegated-sudo",
+            "grant",
+            "create",
+            "project",
+            "--ttl",
+            "30d",
+            "--dir",
+            "/srv/app/*",
+            "--commands",
+            "docker,systemctl",
+        ])
+        .unwrap();
+        let Action::Grant { operation } = parsed.action else {
+            panic!("wrong action")
+        };
+        let Request::Create {
+            directory,
+            commands,
+            ..
+        } = operation.into_request().unwrap()
+        else {
+            panic!("wrong scope")
+        };
+        assert_eq!(directory.as_deref(), Some("/srv/app/*"));
+        assert_eq!(commands, ["docker", "systemctl"]);
+
+        let parsed = Cli::try_parse_from([
+            "delegated-sudo",
+            "grant",
+            "create",
+            "project",
+            "--ttl",
+            "30d",
+            "--dir",
+            "/srv/app",
+        ])
+        .unwrap();
+        let Action::Grant {
+            operation: GrantCommand::Create {
+                directory, command, ..
+            },
+        } = parsed.action
+        else {
+            panic!("wrong action")
+        };
+        assert_eq!(directory.as_deref(), Some("/srv/app"));
+        assert!(command.is_empty());
     }
 
     #[test]

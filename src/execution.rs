@@ -4,6 +4,7 @@ use crate::policy::{GrantError, Result};
 use std::convert::Infallible;
 use std::fs::File;
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
@@ -46,6 +47,7 @@ pub(crate) fn command(allowed: &AllowedExecutable, arguments: &[String]) -> Comm
 pub(crate) fn replace(
     allowed: &AllowedExecutable,
     arguments: &[String],
+    directory: Option<File>,
     root_lock: Option<File>,
 ) -> Result<Infallible> {
     let _root_lock = root_lock;
@@ -53,6 +55,20 @@ pub(crate) fn replace(
     if unsafe { libc::setgroups(0, std::ptr::null()) } != 0 {
         return Err(GrantError("Unable to establish root execution credentials"));
     }
-    let _error = command(allowed, arguments).uid(0).gid(0).exec();
+    let mut process = command(allowed, arguments);
+    if let Some(directory) = directory {
+        // SAFETY: the closure owns the already-authorized directory descriptor.
+        // fchdir uses that descriptor directly, never re-resolving a mutable path.
+        // CLOEXEC closes it on successful execution, after this hook completes.
+        unsafe {
+            process.pre_exec(move || {
+                if libc::fchdir(directory.as_raw_fd()) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let _error = process.uid(0).gid(0).exec();
     Err(GrantError("Unable to execute the allowed program"))
 }

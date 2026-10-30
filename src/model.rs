@@ -35,11 +35,19 @@ pub enum ArgumentPolicy {
     Prefix(Vec<String>),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectoryScope {
+    pub path: String,
+    pub recursive: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Grant {
     pub name: String,
     pub allowed_executables: Vec<AllowedExecutable>,
+    pub directory: Option<DirectoryScope>,
     pub created_at: f64,
     pub expires_at: f64,
     pub revoked: bool,
@@ -52,12 +60,14 @@ pub enum Request {
         name: String,
         commands: Vec<String>,
         ttl: String,
+        directory: Option<String>,
     },
     CreateCommand {
         name: String,
         command: String,
         arguments: Vec<String>,
         ttl: String,
+        directory: Option<String>,
     },
     List {
         cursor: Option<String>,

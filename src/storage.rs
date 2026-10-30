@@ -1,5 +1,6 @@
 //! Private SQLite persistence and an interprocess lock held across each operation.
 
+use crate::directories::StoredDirectory;
 use crate::policy::{GrantError, Result, StoredGrant};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::fs::{self, DirBuilder, File, OpenOptions};
@@ -12,15 +13,16 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS grants (
     name TEXT PRIMARY KEY NOT NULL, token_hash TEXT UNIQUE NOT NULL,
     allowed_executables TEXT NOT NULL, created_at REAL NOT NULL,
     expires_at REAL NOT NULL, revoked INTEGER NOT NULL DEFAULT 0
-    CHECK (revoked IN (0, 1)))";
+    CHECK (revoked IN (0, 1)), directory TEXT)";
 const SELECT: &str =
-    "SELECT name, allowed_executables, created_at, expires_at, revoked FROM grants";
+    "SELECT name, allowed_executables, created_at, expires_at, revoked, directory FROM grants";
 fn unavailable(_: impl std::fmt::Display) -> GrantError {
     GrantError("Grant storage unavailable")
 }
 
 /// The name-based format intentionally retires legacy unnamed grants. This is
 /// atomic and runs under the same exclusive lock as every grant operation.
+/// The directory-scope upgrade preserves all existing named grants and tokens.
 fn initialize(connection: &Connection) -> Result<()> {
     let transaction = connection.unchecked_transaction().map_err(unavailable)?;
     let version: i64 = transaction
@@ -59,12 +61,19 @@ fn initialize(connection: &Connection) -> Result<()> {
                 .execute_batch("DROP TABLE grants")
                 .map_err(unavailable)?;
         }
-        1 if columns == named => return transaction.commit().map_err(unavailable),
+        1 if columns == named => {
+            transaction
+                .execute_batch("ALTER TABLE grants ADD COLUMN directory TEXT")
+                .map_err(unavailable)?;
+        }
+        2 if columns == [&named[..], &["directory"]].concat() => {
+            return transaction.commit().map_err(unavailable);
+        }
         _ => return Err(GrantError("Unsupported grant storage format")),
     }
     transaction.execute_batch(SCHEMA).map_err(unavailable)?;
     transaction
-        .execute_batch("PRAGMA user_version=1")
+        .execute_batch("PRAGMA user_version=2")
         .map_err(unavailable)?;
     transaction.commit().map_err(unavailable)
 }
@@ -106,9 +115,21 @@ fn decode(row: &Row<'_>) -> rusqlite::Result<StoredGrant> {
     let allowed_executables = serde_json::from_str(&serialized).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(error))
     })?;
+    let directory = row
+        .get::<_, Option<String>>(5)?
+        .map(|serialized| serde_json::from_str::<StoredDirectory>(&serialized))
+        .transpose()
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                5,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
     Ok(StoredGrant {
         name: row.get(0)?,
         allowed_executables,
+        directory,
         created_at: row.get(2)?,
         expires_at: row.get(3)?,
         revoked: row.get(4)?,
@@ -154,9 +175,15 @@ impl Store {
 
     pub fn insert(&self, grant: &StoredGrant, token_hash: &str) -> Result<()> {
         let allowed = serde_json::to_string(&grant.allowed_executables).map_err(unavailable)?;
+        let directory = grant
+            .directory
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(unavailable)?;
         self.connection.execute(
-            "INSERT INTO grants (name, token_hash, allowed_executables, created_at, expires_at, revoked) VALUES (?, ?, ?, ?, ?, ?)",
-            params![grant.name, token_hash, allowed, grant.created_at, grant.expires_at, grant.revoked],
+            "INSERT INTO grants (name, token_hash, allowed_executables, created_at, expires_at, revoked, directory) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![grant.name, token_hash, allowed, grant.created_at, grant.expires_at, grant.revoked, directory],
         ).map_err(|error| {
             if error.sqlite_error().is_some_and(|error| error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY) {
                 GrantError("A grant with this name already exists; extend it or choose another name")
@@ -302,6 +329,7 @@ mod tests {
         let grant = StoredGrant {
             name: "named".into(),
             allowed_executables: vec![],
+            directory: None,
             created_at: 1.0,
             expires_at: 100.0,
             revoked: false,
@@ -315,7 +343,7 @@ mod tests {
     fn unsupported_schema_is_not_deleted() {
         for sql in [
             "CREATE TABLE grants (id TEXT, unexpected TEXT); INSERT INTO grants VALUES ('keep', 'me')",
-            "CREATE TABLE grants (id TEXT, unexpected TEXT); INSERT INTO grants VALUES ('keep', 'me'); PRAGMA user_version=1",
+            "CREATE TABLE grants (id TEXT, unexpected TEXT); INSERT INTO grants VALUES ('keep', 'me'); PRAGMA user_version=2",
         ] {
             let connection = Connection::open_in_memory().unwrap();
             connection.execute_batch(sql).unwrap();
@@ -333,6 +361,7 @@ mod tests {
         let grant = StoredGrant {
             name: "named".into(),
             allowed_executables: vec![],
+            directory: None,
             created_at: 1.0,
             expires_at: 100.0,
             revoked: false,
@@ -343,5 +372,67 @@ mod tests {
         assert_eq!(store.find("named").unwrap().expires_at, 100.0);
         assert!(store.find_hash("old-hash").unwrap().is_some());
         assert!(store.find_hash("new-hash").unwrap().is_none());
+    }
+
+    #[test]
+    fn directory_upgrade_preserves_named_grants_and_tokens() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(NAMED_SCHEMA).unwrap();
+        connection.execute_batch("PRAGMA user_version=1").unwrap();
+        connection
+            .execute(
+                "INSERT INTO grants VALUES ('kept', 'kept-hash', '[]', 10, 100, 1)",
+                [],
+            )
+            .unwrap();
+        initialize(&connection).unwrap();
+        let store = Store {
+            connection,
+            root_lock: None,
+        };
+        let saved = store.find_hash("kept-hash").unwrap().unwrap();
+        assert_eq!(saved.name, "kept");
+        assert_eq!(saved.created_at, 10.0);
+        assert_eq!(saved.expires_at, 100.0);
+        assert!(saved.revoked);
+        assert!(saved.directory.is_none());
+        initialize(&store.connection).unwrap();
+        assert!(store.find_hash("kept-hash").unwrap().is_some());
+        assert_eq!(
+            store
+                .connection
+                .query_row::<i64, _, _>("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn invalid_stored_directory_cannot_become_an_unrestricted_grant() {
+        let store = Store::in_memory();
+        let grant = StoredGrant {
+            name: "restricted".into(),
+            allowed_executables: vec![],
+            directory: None,
+            created_at: 1.0,
+            expires_at: 100.0,
+            revoked: false,
+        };
+        store.insert(&grant, "hash").unwrap();
+        for value in [
+            "null",
+            "{}",
+            "not-json",
+            r#"{"scope":{"path":"/project","recursive":"yes"},"device":1,"inode":2}"#,
+            r#"{"scope":{"path":"/project","recursive":true},"device":1,"inode":2,"unknown":true}"#,
+        ] {
+            store
+                .connection
+                .execute("UPDATE grants SET directory = ?", [value])
+                .unwrap();
+            assert!(store.find_hash("hash").is_err());
+            assert!(store.find("restricted").is_err());
+            assert!(store.page(None).is_err());
+        }
     }
 }

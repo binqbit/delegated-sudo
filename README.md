@@ -99,14 +99,42 @@ Creation prints a compact block:
 ```text
 delegated-sudo grant docker-compose-codex:
 - command: docker compose *
+- dir: any
 - token: <secret token>
 - expires: <expiration date and time in UTC>
 ```
 
 The command includes the complete fixed arguments and any final `*` marker.
+The `- dir:` field always shows where execution is allowed: `/path` for that exact
+directory, `/path/*` for it and all descendants, or `any` for no directory restriction.
 Pass the token privately to its intended holder. Anyone who obtains it can use
 it; tokens are not tied to a username or process. The name identifies the grant
 for administration; only its secret token authorizes execution.
+
+## Restrict the working directory
+
+Add `--dir` to any creation form to limit where the holder may launch the command:
+
+```bash
+sudo delegated-sudo grant create project --ttl 30d --dir /srv/app -- docker compose \*
+sudo delegated-sudo grant create project-tree --ttl 30d --dir /srv/app/\* -- docker compose \*
+```
+
+`--dir /srv/app` permits only that directory. `--dir /srv/app/*` permits the
+directory itself and all descendants, at any depth. Escape the final star when
+passing it through a shell, or quote the whole path. Without `--dir`, any working
+directory is allowed. Relative paths are resolved from the administrator's
+working directory at creation; output shows the canonical absolute path.
+
+Execution checks the holder's actual current directory and refuses a launch
+outside the permitted scope. It does not change directories automatically.
+`..` components and symlinks cannot make an outside location count as inside.
+The allowed directory must exist at creation. Its identity is recorded: removing
+or replacing that directory requires a new grant; renewal does not rebind it.
+
+This restriction checks the initial working directory. It does not sandbox file
+access or prevent the allowed program from changing directories or accessing
+other paths through its arguments or configuration.
 
 ## Use and manage grants
 
@@ -144,7 +172,9 @@ sudo delegated-sudo grant delete docker-compose-codex
 
 `list` shows names, full permitted commands, expiration times in UTC, and
 `active`, `expired`, or `revoked` status. It uses a compact table when fields fit
-and labeled rows for narrow terminals or long names/commands. `show` also gives
+and labeled rows for narrow terminals or long names/commands. When any grant has
+a directory restriction, the list includes a `DIR` column or `Directory:` line;
+`any` means unrestricted. `show` also gives the directory scope,
 the recorded executable paths and exact argument policy. Neither exposes tokens
 or hashes.
 
@@ -152,7 +182,7 @@ TTL accepts a positive integer followed by `s`, `m`, `h`, or `d`, up to **30 day
 (`30d`). A day is 24 hours; the maximum is a fixed duration, not a calendar month.
 `extend` sets expiration to the current time plus the supplied TTL, whether the
 grant is active or expired. It issues and displays a new token; the previous token
-immediately stops working. The name, command scope, and original
+immediately stops working. The name, command scope, directory scope, and original
 creation time stay unchanged. A revoked grant cannot be renewed.
 
 `revoke` disables a grant but keeps it visible for inspection. `delete` removes

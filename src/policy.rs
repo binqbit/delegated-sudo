@@ -1,5 +1,6 @@
 //! Domain rules independent of storage, privilege elevation, and process I/O.
 
+use crate::directories::StoredDirectory;
 use crate::model::{AllowedExecutable, ArgumentPolicy, Grant};
 use std::{error::Error, fmt};
 
@@ -18,6 +19,7 @@ pub(crate) type Result<T> = std::result::Result<T, GrantError>;
 pub(crate) struct StoredGrant {
     pub name: String,
     pub allowed_executables: Vec<AllowedExecutable>,
+    pub directory: Option<StoredDirectory>,
     pub created_at: f64,
     pub expires_at: f64,
     pub revoked: bool,
@@ -28,6 +30,10 @@ impl StoredGrant {
         Grant {
             name: self.name.clone(),
             allowed_executables: self.allowed_executables.clone(),
+            directory: self
+                .directory
+                .as_ref()
+                .map(|directory| directory.scope.clone()),
             created_at: self.created_at,
             expires_at: self.expires_at,
             revoked: self.revoked,
