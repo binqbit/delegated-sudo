@@ -11,6 +11,17 @@ holder. The holder uses that token to execute the permitted command as root.
 
 CREATE A GRANT (ordinary sudo authorization)
 
+  Options:
+    --ttl <TTL>       Required lifetime, for example 60m or 30d (maximum 30 days).
+    --allow-args      Allow extra arguments after the fixed command prefix.
+    --dir <PATH>      Allow launches from this directory only.
+    --recursive       With --dir, also allow launches from all its descendants.
+    --commands <EXE>  Allow all operations of comma-separated executables instead
+                      of a fixed command. Cannot be combined with --allow-args.
+
+  Example with extra arguments and all project subdirectories allowed:
+    sudo delegated-sudo grant create compose-codex --ttl 30d --dir /srv/app --recursive --allow-args -- docker compose
+
   Interactive command entry:
     sudo delegated-sudo grant create <NAME> --ttl <TTL>
     Enter the command at the Command: prompt. A final * allows extra arguments.
@@ -150,6 +161,10 @@ pub(super) enum Action {
 #[derive(Debug, Subcommand)]
 pub(super) enum GrantCommand {
     /// Grant an exact invocation, an argument prefix, or broad executable access.
+    #[command(
+        arg_required_else_help = true,
+        after_help = "Example: allow extra Docker Compose arguments in a project and its subdirectories:\n  sudo delegated-sudo grant create compose-codex --ttl 30d --dir /srv/app --recursive --allow-args -- docker compose"
+    )]
     Create {
         /// Unique grant name, used by every management command.
         name: String,
@@ -301,6 +316,41 @@ impl GrantCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn creation_help_explains_scope_options_and_shows_them_together() {
+        let cases: &[&[&str]] = &[
+            &["delegated-sudo", "grant", "create"],
+            &["delegated-sudo"],
+            &["delegated-sudo", "--help"],
+            &["delegated-sudo", "help"],
+            &["delegated-sudo", "grant"],
+            &["delegated-sudo", "grant", "--help"],
+            &["delegated-sudo", "grant", "create", "--help"],
+            &["delegated-sudo", "help", "grant", "create"],
+        ];
+        for arguments in cases {
+            let error = Cli::try_parse_from(arguments.iter().copied()).unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp
+                    | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+            ));
+            let help = error.to_string();
+            for option in ["--allow-args", "--dir", "--recursive"] {
+                assert!(help.contains(option), "{arguments:?} omitted {option}");
+            }
+            assert!(
+                help.lines().any(|line| {
+                    line.contains("sudo delegated-sudo grant create")
+                        && line.contains("--allow-args")
+                        && line.contains("--dir")
+                        && line.contains("--recursive")
+                }),
+                "{arguments:?} omitted the combined command and directory example"
+            );
+        }
+    }
 
     #[test]
     fn parser_preserves_every_argument_after_executable() {

@@ -23,6 +23,9 @@ delegated-sudo --help
 ```
 
 `-h` and `help` show the same complete guide. Help does not require sudo.
+The guide starts with creation options, including `--allow-args`, `--dir`, and
+`--recursive`, and an example combining them. `delegated-sudo grant create`
+without arguments also shows its options and example.
 
 ## Required access rules
 
