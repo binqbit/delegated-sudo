@@ -1,11 +1,27 @@
-//! A terminal star in a grant opens only the suffix after an exact prefix.
+//! Explicit argument-prefix grants open only the suffix after a fixed command.
 
 use crate::Result;
 use crate::harness::{Harness, PROBE, check, denied, succeeded};
 use serde_json::{Value, json};
 
 pub(crate) fn command(harness: &Harness) -> Result<()> {
-    let grant = harness.create_command(&[PROBE, "--probe", "first", "second", "*"], "60m")?;
+    let grant = Harness::creation_response(succeeded(harness.cli(
+        &[
+            "grant",
+            "create",
+            "explicit-prefix",
+            "--ttl",
+            "60m",
+            "--allow-args",
+            "--",
+            PROBE,
+            "--probe",
+            "first",
+            "second",
+        ],
+        true,
+        None,
+    )?)?)?;
     for suffix in [vec![], vec!["more words", "", "last"]] {
         let mut arguments = vec!["exec", PROBE, "--probe", "first", "second"];
         arguments.extend_from_slice(&suffix);

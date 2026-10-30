@@ -83,15 +83,17 @@ For scripts or a single shell command, provide the invocation after `--`:
 
 ```bash
 sudo delegated-sudo grant create deploy --ttl 60m -- docker compose up -d
-sudo delegated-sudo grant create compose --ttl 30d -- docker compose \*
+sudo delegated-sudo grant create compose --ttl 30d --allow-args -- docker compose
 ```
 
 The first grant permits exactly `docker compose up -d`. Changed subcommands,
 flags, argument order, or additional arguments are rejected. The second permits
-any arguments after `docker compose`. The backslash protects the star from the
-calling shell; quotes are optional. A bare `*` on a Bash/Zsh command line is
-expanded by that shell before this application starts. Use the interactive prompt
-for a bare star. The marker belongs only in the grant definition, not in execution.
+any arguments after `docker compose`. Use `--allow-args` for a one-line command so
+the calling shell has no star to expand. A final quoted or escaped `*` is also
+supported, but a bare `*` on a Bash/Zsh command line becomes filenames before this
+application starts. Those filenames are indistinguishable from intentional
+literal arguments. For a bare star, use the interactive `Command:` prompt above.
+Neither `--allow-args` nor the marker belongs in the command used for execution.
 
 For a holder trusted with every operation of an executable, use the broader mode:
 
@@ -128,8 +130,8 @@ for administration; only its secret token authorizes execution.
 Add `--dir` to any creation form to limit where the holder may launch the command:
 
 ```bash
-sudo delegated-sudo grant create project --ttl 30d --dir /srv/app -- docker compose \*
-sudo delegated-sudo grant create project-tree --ttl 30d --dir /srv/app/\* -- docker compose \*
+sudo delegated-sudo grant create project --ttl 30d --dir /srv/app --allow-args -- docker compose
+sudo delegated-sudo grant create project-tree --ttl 30d --dir /srv/app/\* --allow-args -- docker compose
 ```
 
 `--dir /srv/app` permits only that directory. `--dir /srv/app/*` permits the

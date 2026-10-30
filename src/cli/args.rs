@@ -26,11 +26,13 @@ CREATE A GRANT (ordinary sudo authorization)
       sudo delegated-sudo grant create deploy --ttl 60m -- docker compose up -d
 
   Command with additional arguments allowed:
-    sudo delegated-sudo grant create <NAME> --ttl <TTL> -- <COMMAND> [ARGUMENTS...] \*
+    sudo delegated-sudo grant create <NAME> --ttl <TTL> --allow-args -- <COMMAND> [ARGUMENTS...]
     Keep the fixed beginning; the holder may append zero or more arguments.
     Example:
-      sudo delegated-sudo grant create compose-codex --ttl 30d -- docker compose \*
-    In a shell command, use \* or '*' so the shell does not expand filenames.
+      sudo delegated-sudo grant create compose-codex --ttl 30d --allow-args -- docker compose
+    No star is needed. A literal final * is also supported at the interactive
+    prompt or as \* / '*' in a shell command. A bare shell * expands to filenames
+    before delegated-sudo receives it; use --allow-args for one-line commands.
 
   All operations of selected executables:
     sudo delegated-sudo grant create <NAME> --ttl <TTL> --commands <EXECUTABLES>
@@ -151,6 +153,9 @@ pub(super) enum GrantCommand {
         /// Allow arguments/subcommands for these executables; shell syntax is rejected.
         #[arg(long, value_name = "EXECUTABLES", conflicts_with = "command")]
         commands: Option<String>,
+        /// Permit additional arguments after the fixed command; no final star is needed.
+        #[arg(long, conflicts_with = "commands")]
+        allow_args: bool,
         /// Lifetime from now, such as 60m or 30d (maximum 30 days).
         #[arg(long)]
         ttl: String,
@@ -234,10 +239,14 @@ impl GrantCommand {
                 commands: None,
                 ttl,
                 directory,
+                allow_args,
                 mut command,
             } => {
                 if command.is_empty() {
                     command = read_command()?;
+                }
+                if allow_args && !command.last().is_some_and(|argument| argument == "*") {
+                    command.push("*".into());
                 }
                 let mut command = command.into_iter();
                 Request::CreateCommand {
@@ -346,6 +355,119 @@ mod tests {
         );
         assert_eq!(ttl, "60m");
         assert!(directory.is_none());
+    }
+
+    #[test]
+    fn allow_args_grants_a_fixed_prefix_without_a_shell_star() {
+        let parsed = Cli::try_parse_from([
+            "delegated-sudo",
+            "grant",
+            "create",
+            "compose-codex",
+            "--ttl",
+            "30d",
+            "--allow-args",
+            "--",
+            "docker",
+            "compose",
+            "--file",
+            "a b.yml",
+            "",
+        ])
+        .unwrap();
+        let Action::Grant { operation } = parsed.action else {
+            panic!("wrong action")
+        };
+        let Request::CreateCommand {
+            command, arguments, ..
+        } = operation.into_request().unwrap()
+        else {
+            panic!("wrong scope")
+        };
+        assert_eq!(command, "docker");
+        let crate::model::ArgumentPolicy::Prefix(prefix) =
+            crate::policy::argument_policy(arguments)
+        else {
+            panic!("additional arguments were not enabled")
+        };
+        assert_eq!(prefix, ["compose", "--file", "a b.yml", ""]);
+    }
+
+    #[test]
+    fn allow_args_does_not_duplicate_a_literal_prefix_marker() {
+        let parsed = Cli::try_parse_from([
+            "delegated-sudo",
+            "grant",
+            "create",
+            "compose-codex",
+            "--ttl",
+            "30d",
+            "--allow-args",
+            "--",
+            "docker",
+            "compose",
+            "*",
+        ])
+        .unwrap();
+        let Action::Grant { operation } = parsed.action else {
+            panic!("wrong action")
+        };
+        let Request::CreateCommand { arguments, .. } = operation.into_request().unwrap() else {
+            panic!("wrong scope")
+        };
+        let crate::model::ArgumentPolicy::Prefix(prefix) =
+            crate::policy::argument_policy(arguments)
+        else {
+            panic!("additional arguments were not enabled")
+        };
+        assert_eq!(prefix, ["compose"]);
+    }
+
+    #[test]
+    fn allow_args_cannot_be_combined_with_broad_executable_access() {
+        assert!(
+            Cli::try_parse_from([
+                "delegated-sudo",
+                "grant",
+                "create",
+                "maintenance",
+                "--ttl",
+                "1d",
+                "--allow-args",
+                "--commands",
+                "docker,systemctl",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn allow_args_after_the_separator_remains_a_literal_command_argument() {
+        let parsed = Cli::try_parse_from([
+            "delegated-sudo",
+            "grant",
+            "create",
+            "exact-command",
+            "--ttl",
+            "1h",
+            "--",
+            "docker",
+            "compose",
+            "--allow-args",
+        ])
+        .unwrap();
+        let Action::Grant { operation } = parsed.action else {
+            panic!("wrong action")
+        };
+        let Request::CreateCommand { arguments, .. } = operation.into_request().unwrap() else {
+            panic!("wrong scope")
+        };
+        let crate::model::ArgumentPolicy::Exact(arguments) =
+            crate::policy::argument_policy(arguments)
+        else {
+            panic!("a command argument unexpectedly broadened the grant")
+        };
+        assert_eq!(arguments, ["compose", "--allow-args"]);
     }
 
     #[test]

@@ -41,13 +41,19 @@ When the user authorizes multiple Compose operations in that project and its
 subdirectories, a prefix grant can be appropriate:
 
 ```bash
-sudo delegated-sudo grant create compose-codex --ttl 1d --dir /srv/app/\* -- docker compose \*
+sudo delegated-sudo grant create compose-codex --ttl 1d --dir /srv/app/\* --allow-args -- docker compose
 ```
 
-Explain the two independent markers: `--dir /srv/app/*` allows the directory and
-all descendants; `docker compose *` allows additional arguments after `compose`.
-In shell commands, escape each star as `\*` or quote the corresponding argument.
-A bare shell star may expand to filenames before delegated-sudo receives it.
+`--allow-args` permits additional arguments after the fixed `docker compose`
+prefix; the resulting grant displays `docker compose *`. Prefer this flag in
+shell commands so the command scope cannot be changed by shell glob expansion.
+It cannot be combined with `--commands`. If the installed version lacks this
+flag, use the interactive command-entry form below instead.
+
+The independent `--dir /srv/app/*` marker allows that directory and all
+descendants. Escape its star as `\*` or quote the entire path. Never give the
+user a bare shell star: it may become filenames before delegated-sudo starts,
+and the application cannot distinguish them from intentional literal arguments.
 
 For interactive command entry, give the user the launch command and prompt input
 separately:
