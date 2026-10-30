@@ -41,7 +41,7 @@ When the user authorizes multiple Compose operations in that project and its
 subdirectories, a prefix grant can be appropriate:
 
 ```bash
-sudo delegated-sudo grant create compose-codex --ttl 1d --dir /srv/app/\* --allow-args -- docker compose
+sudo delegated-sudo grant create compose-codex --ttl 1d --dir /srv/app --recursive --allow-args -- docker compose
 ```
 
 `--allow-args` permits additional arguments after the fixed `docker compose`
@@ -50,10 +50,12 @@ shell commands so the command scope cannot be changed by shell glob expansion.
 It cannot be combined with `--commands`. If the installed version lacks this
 flag, use the interactive command-entry form below instead.
 
-The independent `--dir /srv/app/*` marker allows that directory and all
-descendants. Escape its star as `\*` or quote the entire path. Never give the
-user a bare shell star: it may become filenames before delegated-sudo starts,
-and the application cannot distinguish them from intentional literal arguments.
+`--recursive` independently extends `--dir` to include that directory and all
+descendants; it requires a directory and does not change command arguments.
+Prefer this form so no directory wildcard passes through the shell. For an
+installed version without `--recursive`, the equivalent `--dir '/srv/app/*'`
+is supported: quote the whole path. Never give the user a bare shell star; it
+may become filenames before delegated-sudo starts.
 
 For interactive command entry, give the user the launch command and prompt input
 separately:
@@ -82,9 +84,10 @@ sudo delegated-sudo grant create maintenance --ttl 2h --commands docker,systemct
 Names are unique and case-sensitive; quote names containing spaces. TTL accepts
 positive integers with `s`, `m`, `h`, or `d`, up to 30 days (`30d`).
 
-`--dir /srv/app` permits only that directory. The `/*` suffix also permits its
-descendants; omitting `--dir` leaves the working directory unrestricted. Relative
-paths are resolved at creation, and the directory must exist. This checks the
+`--dir /srv/app` permits only that directory. Add `--recursive` to permit its
+descendants; output represents that scope as `/srv/app/*`. Omitting `--dir`
+leaves the working directory unrestricted. Relative paths are resolved at
+creation, and the directory must exist. This checks the
 initial working directory, not the files the program can access: for example,
 Docker's `-f /other/compose.yml` can still select another file when arguments allow
 it. Do not describe a directory grant as a filesystem sandbox.

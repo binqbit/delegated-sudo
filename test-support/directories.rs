@@ -13,14 +13,13 @@ fn in_directory(harness: &Harness, directory: &Path) -> Harness {
     located
 }
 
-fn create(harness: &Harness, name: &str, directory: &str) -> Result<SecretGrant> {
-    Harness::creation_response(succeeded(harness.cli(
-        &[
-            "grant", "create", name, "--ttl", "60m", "--dir", directory, "--", "id", "-u",
-        ],
-        true,
-        None,
-    )?)?)
+fn create(harness: &Harness, name: &str, directory: &str, recursive: bool) -> Result<SecretGrant> {
+    let mut arguments = vec!["grant", "create", name, "--ttl", "60m", "--dir", directory];
+    if recursive {
+        arguments.push("--recursive");
+    }
+    arguments.extend(["--", "id", "-u"]);
+    Harness::creation_response(succeeded(harness.cli(&arguments, true, None)?)?)
 }
 
 fn executes(harness: &Harness, grant: &SecretGrant, directory: &Path) -> Result<()> {
@@ -49,7 +48,7 @@ pub(crate) fn restrictions(harness: &Harness) -> Result<()> {
     fs::create_dir(&outside)?;
     let root_text = root.to_str().ok_or("invalid directory fixture path")?;
 
-    let exact = create(harness, "directory-exact", root_text)?;
+    let exact = create(harness, "directory-exact", root_text, false)?;
     executes(harness, &exact, &root)?;
     rejects(harness, &exact, &nested)?;
     rejects(harness, &exact, &outside)?;
@@ -61,17 +60,26 @@ pub(crate) fn restrictions(harness: &Harness) -> Result<()> {
         &in_directory(harness, &fixture),
         "directory-relative",
         "project",
+        false,
     )?;
     executes(harness, &relative, &root)?;
     rejects(harness, &relative, &fixture)?;
     rejects(harness, &relative, &nested)?;
 
-    let tree = create(harness, "directory-tree", &format!("{root_text}/*"))?;
+    let tree = create(harness, "directory-tree", root_text, true)?;
     executes(harness, &tree, &root)?;
     executes(harness, &tree, &nested)?;
     rejects(harness, &tree, &sibling)?;
     rejects(harness, &tree, &outside)?;
     rejects(harness, &tree, &root.join("../outside"))?;
+    let legacy = create(
+        harness,
+        "directory-legacy",
+        &format!("{root_text}/*"),
+        false,
+    )?;
+    executes(harness, &legacy, &nested)?;
+    rejects(harness, &legacy, &outside)?;
     denied(in_directory(harness, &outside).cli_with(
         &["exec", "id", "-u"],
         false,
@@ -87,7 +95,6 @@ pub(crate) fn restrictions(harness: &Harness) -> Result<()> {
     symlink(&outside, &escape)?;
     rejects(harness, &tree, &escape)?;
 
-    let tree_scope = format!("{root_text}/*");
     let probe = Harness::creation_response(succeeded(harness.cli(
         &[
             "grant",
@@ -96,7 +103,8 @@ pub(crate) fn restrictions(harness: &Harness) -> Result<()> {
             "--ttl",
             "60m",
             "--dir",
-            &tree_scope,
+            root_text,
+            "--recursive",
             "--",
             PROBE,
             "--probe",
@@ -177,5 +185,23 @@ pub(crate) fn restrictions(harness: &Harness) -> Result<()> {
         )?)?;
         denied(harness.cli(&["grant", "show", "directory-invalid"], true, None)?)?;
     }
+    denied(harness.cli(
+        &[
+            "grant",
+            "create",
+            "directory-empty-recursive",
+            "--ttl",
+            "60m",
+            "--dir",
+            "",
+            "--recursive",
+            "--",
+            "id",
+            "-u",
+        ],
+        true,
+        None,
+    )?)?;
+    denied(harness.cli(&["grant", "show", "directory-empty-recursive"], true, None)?)?;
     Ok(())
 }

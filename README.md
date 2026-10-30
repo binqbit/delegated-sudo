@@ -131,14 +131,16 @@ Add `--dir` to any creation form to limit where the holder may launch the comman
 
 ```bash
 sudo delegated-sudo grant create project --ttl 30d --dir /srv/app --allow-args -- docker compose
-sudo delegated-sudo grant create project-tree --ttl 30d --dir /srv/app/\* --allow-args -- docker compose
+sudo delegated-sudo grant create project-tree --ttl 30d --dir /srv/app --recursive --allow-args -- docker compose
 ```
 
-`--dir /srv/app` permits only that directory. `--dir /srv/app/*` permits the
-directory itself and all descendants, at any depth. Escape the final star when
-passing it through a shell, or quote the whole path. Without `--dir`, any working
-directory is allowed. Relative paths are resolved from the administrator's
-working directory at creation; output shows the canonical absolute path.
+`--dir /srv/app` permits only that directory. Add `--recursive` to permit the
+directory itself and all descendants, at any depth, without a shell wildcard.
+`--recursive` requires `--dir`. The equivalent legacy form `--dir '/srv/app/*'`
+is also supported; quote that pattern so the shell does not expand it.
+Without `--dir`, any working directory is allowed. Relative paths are resolved
+from the administrator's working directory at creation; output shows the
+canonical absolute path, with `/*` for a recursive scope.
 
 Execution checks the holder's actual current directory and refuses a launch
 outside the permitted scope. It does not change directories automatically.

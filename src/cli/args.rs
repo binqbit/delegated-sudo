@@ -45,13 +45,14 @@ CREATE A GRANT (ordinary sudo authorization)
   The dir field is a path, PATH/* for a directory tree, or any if unrestricted.
 
   Optional working-directory restriction (with any creation form):
-    --dir <PATH>      Permit launches only from this existing directory.
-    --dir <PATH>/*    Permit this directory and all its descendants.
+    --dir <PATH>                Permit launches only from this existing directory.
+    --dir <PATH> --recursive    Permit this directory and all its descendants.
     Examples:
       sudo delegated-sudo grant create project --ttl 30d --dir /srv/app
-      sudo delegated-sudo grant create project-tree --ttl 30d --dir /srv/app/\*
+      sudo delegated-sudo grant create project-tree --ttl 30d --dir /srv/app --recursive
       Command: docker compose *
-    Escape the star in a shell command, or quote the entire path.
+    No directory star is needed. A quoted --dir '/srv/app/*' remains supported.
+    --recursive requires --dir. The displayed directory scope remains /srv/app/*.
     Without --dir, the holder may launch from any working directory.
     The command runs in the holder's current directory; it is never moved.
     Paths are checked after resolving ../ and symlinks; locations outside the
@@ -159,9 +160,12 @@ pub(super) enum GrantCommand {
         /// Lifetime from now, such as 60m or 30d (maximum 30 days).
         #[arg(long)]
         ttl: String,
-        /// Permit this directory only, or PATH/* for it and all descendants.
+        /// Permit this directory only; add --recursive to include descendants.
         #[arg(long = "dir", value_name = "PATH")]
         directory: Option<String>,
+        /// Include all descendants of --dir without a shell star.
+        #[arg(long, requires = "directory")]
+        recursive: bool,
         /// Command after --; omit to enter it interactively with a literal final *.
         #[arg(last = true, num_args = 1.., value_name = "COMMAND")]
         command: Vec<String>,
@@ -219,6 +223,27 @@ fn read_command() -> io::Result<Vec<String>> {
     parse_command_line(line.strip_suffix('\n').unwrap_or(&line))
 }
 
+fn directory_scope(directory: Option<String>, recursive: bool) -> io::Result<Option<String>> {
+    if !recursive {
+        return Ok(directory);
+    }
+    let mut directory = directory.ok_or_else(|| io::Error::other("--recursive requires --dir"))?;
+    if directory.is_empty() {
+        return Err(io::Error::other("--dir must not be empty"));
+    }
+    if !directory.ends_with("/*") {
+        while directory.len() > 1 && directory.ends_with('/') {
+            directory.pop();
+        }
+        if directory.ends_with('/') {
+            directory.push('*');
+        } else {
+            directory.push_str("/*");
+        }
+    }
+    Ok(Some(directory))
+}
+
 impl GrantCommand {
     pub(super) fn into_request(self) -> io::Result<Request> {
         Ok(match self {
@@ -227,21 +252,24 @@ impl GrantCommand {
                 commands: Some(commands),
                 ttl,
                 directory,
+                recursive,
                 ..
             } => Request::Create {
                 name,
                 commands: commands.split(',').map(String::from).collect(),
                 ttl,
-                directory,
+                directory: directory_scope(directory, recursive)?,
             },
             GrantCommand::Create {
                 name,
                 commands: None,
                 ttl,
                 directory,
+                recursive,
                 allow_args,
                 mut command,
             } => {
+                let directory = directory_scope(directory, recursive)?;
                 if command.is_empty() {
                     command = read_command()?;
                 }
@@ -468,6 +496,202 @@ mod tests {
             panic!("a command argument unexpectedly broadened the grant")
         };
         assert_eq!(arguments, ["compose", "--allow-args"]);
+    }
+
+    #[test]
+    fn recursive_directory_normalization_preserves_the_requested_root() {
+        for (input, expected) in [
+            ("/srv/app", "/srv/app/*"),
+            ("/srv/app/", "/srv/app/*"),
+            ("/srv/app///", "/srv/app/*"),
+            ("/srv/app/*", "/srv/app/*"),
+            ("/srv/my app", "/srv/my app/*"),
+            (".", "./*"),
+            ("/", "/*"),
+            ("///", "/*"),
+        ] {
+            assert_eq!(
+                directory_scope(Some(input.into()), true)
+                    .unwrap()
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+        assert_eq!(directory_scope(None, false).unwrap(), None);
+        assert_eq!(
+            directory_scope(Some("/srv/app/".into()), false)
+                .unwrap()
+                .as_deref(),
+            Some("/srv/app/")
+        );
+    }
+
+    #[test]
+    fn recursive_requires_a_nonempty_directory() {
+        assert!(
+            Cli::try_parse_from([
+                "delegated-sudo",
+                "grant",
+                "create",
+                "project",
+                "--ttl",
+                "1h",
+                "--recursive",
+                "--commands",
+                "id",
+            ])
+            .is_err()
+        );
+        let Action::Grant { operation } = Cli::try_parse_from([
+            "delegated-sudo",
+            "grant",
+            "create",
+            "project",
+            "--ttl",
+            "1h",
+            "--dir",
+            "",
+            "--recursive",
+            "--commands",
+            "id",
+        ])
+        .unwrap()
+        .action
+        else {
+            panic!("wrong action")
+        };
+        assert!(operation.into_request().is_err());
+        assert!(directory_scope(None, true).is_err());
+        assert!(directory_scope(Some(String::new()), true).is_err());
+    }
+
+    #[test]
+    fn recursive_works_with_exact_prefix_broad_and_interactive_creation() {
+        for allow_args in [false, true] {
+            let mut arguments = vec![
+                "delegated-sudo",
+                "grant",
+                "create",
+                "project",
+                "--ttl",
+                "1h",
+                "--dir",
+                "/srv/app",
+                "--recursive",
+            ];
+            if allow_args {
+                arguments.push("--allow-args");
+            }
+            arguments.extend(["--", "docker", "compose"]);
+            let Action::Grant { operation } = Cli::try_parse_from(arguments).unwrap().action else {
+                panic!("wrong action")
+            };
+            let Request::CreateCommand {
+                directory,
+                arguments,
+                ..
+            } = operation.into_request().unwrap()
+            else {
+                panic!("wrong scope")
+            };
+            assert_eq!(directory.as_deref(), Some("/srv/app/*"));
+            if allow_args {
+                assert_eq!(arguments, ["compose", "*"]);
+            } else {
+                assert_eq!(arguments, ["compose"]);
+            }
+        }
+        let Action::Grant { operation } = Cli::try_parse_from([
+            "delegated-sudo",
+            "grant",
+            "create",
+            "project",
+            "--ttl",
+            "1h",
+            "--dir",
+            "/srv/app",
+            "--recursive",
+            "--commands",
+            "docker,systemctl",
+        ])
+        .unwrap()
+        .action
+        else {
+            panic!("wrong action")
+        };
+        let Request::Create {
+            directory,
+            commands,
+            ..
+        } = operation.into_request().unwrap()
+        else {
+            panic!("wrong scope")
+        };
+        assert_eq!(directory.as_deref(), Some("/srv/app/*"));
+        assert_eq!(commands, ["docker", "systemctl"]);
+
+        let Action::Grant {
+            operation:
+                GrantCommand::Create {
+                    directory,
+                    recursive,
+                    command,
+                    ..
+                },
+        } = Cli::try_parse_from([
+            "delegated-sudo",
+            "grant",
+            "create",
+            "project",
+            "--ttl",
+            "1h",
+            "--dir",
+            "/srv/app",
+            "--recursive",
+        ])
+        .unwrap()
+        .action
+        else {
+            panic!("wrong action")
+        };
+        assert!(recursive && command.is_empty());
+        assert_eq!(
+            directory_scope(directory, recursive).unwrap().as_deref(),
+            Some("/srv/app/*")
+        );
+    }
+
+    #[test]
+    fn recursive_after_the_separator_remains_a_literal_command_argument() {
+        let Action::Grant { operation } = Cli::try_parse_from([
+            "delegated-sudo",
+            "grant",
+            "create",
+            "project",
+            "--ttl",
+            "1h",
+            "--dir",
+            "/srv/app",
+            "--",
+            "docker",
+            "compose",
+            "--recursive",
+        ])
+        .unwrap()
+        .action
+        else {
+            panic!("wrong action")
+        };
+        let Request::CreateCommand {
+            directory,
+            arguments,
+            ..
+        } = operation.into_request().unwrap()
+        else {
+            panic!("wrong scope")
+        };
+        assert_eq!(directory.as_deref(), Some("/srv/app"));
+        assert_eq!(arguments, ["compose", "--recursive"]);
     }
 
     #[test]
