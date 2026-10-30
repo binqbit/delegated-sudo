@@ -37,10 +37,12 @@ fn now() -> Result<f64> {
 
 pub(crate) fn create_grant(
     store: &Store,
+    name: String,
     allowed: Vec<AllowedExecutable>,
     seconds: u64,
     timestamp: f64,
 ) -> Result<AdminResponse> {
+    policy::validate_name(&name)?;
     for executable in &allowed {
         let arguments = match &executable.argument_policy {
             ArgumentPolicy::Any => &[][..],
@@ -51,7 +53,7 @@ pub(crate) fn create_grant(
     }
     let token = SecretToken::generate()?;
     let record = StoredGrant {
-        id: credentials::grant_id()?,
+        name,
         allowed_executables: allowed,
         created_at: timestamp,
         expires_at: timestamp + seconds as f64,
@@ -75,7 +77,7 @@ pub(crate) fn list_grants(
     timestamp: f64,
 ) -> Result<AdminResponse> {
     if let Some(cursor) = cursor {
-        policy::validate_id(cursor)?;
+        policy::validate_name(cursor)?;
     }
     let records = store.page(cursor)?;
     let grants: Vec<_> = records
@@ -84,7 +86,7 @@ pub(crate) fn list_grants(
         .map(|record| record.public(timestamp))
         .collect();
     let next_cursor = if grants.len() < records.len() {
-        grants.last().map(|grant| grant.id.clone())
+        grants.last().map(|grant| grant.name.clone())
     } else {
         None
     };
@@ -96,45 +98,62 @@ pub(crate) fn list_grants(
 
 pub(crate) fn dispatch(store: &Store, request: Request, timestamp: f64) -> Result<AdminResponse> {
     match request {
-        Request::Create { commands, ttl } => {
+        Request::Create {
+            name,
+            commands,
+            ttl,
+        } => {
+            policy::validate_name(&name)?;
             let seconds = policy::parse_ttl(&ttl)?;
             create_grant(
                 store,
+                name,
                 executables::resolve_commands(&commands)?,
                 seconds,
                 timestamp,
             )
         }
         Request::CreateCommand {
+            name,
             command,
             arguments,
             ttl,
         } => {
+            policy::validate_name(&name)?;
             let seconds = policy::parse_ttl(&ttl)?;
             input_policy::invocation(&command, &arguments)?;
             let mut allowed = executables::resolve_commands(&[command])?;
             allowed[0].argument_policy = policy::argument_policy(arguments);
-            create_grant(store, allowed, seconds, timestamp)
+            create_grant(store, name, allowed, seconds, timestamp)
         }
         Request::List { cursor } => list_grants(store, cursor.as_deref(), timestamp),
-        Request::Show { id } => {
-            policy::validate_id(&id)?;
-            Ok(AdminResponse::Grant(store.find(&id)?.public(timestamp)))
+        Request::Show { name } => {
+            policy::validate_name(&name)?;
+            Ok(AdminResponse::Grant(store.find(&name)?.public(timestamp)))
         }
-        Request::Revoke { id } => {
-            policy::validate_id(&id)?;
-            let mut record = store.find(&id)?;
-            store.revoke(&id)?;
+        Request::Revoke { name } => {
+            policy::validate_name(&name)?;
+            let mut record = store.find(&name)?;
+            store.revoke(&name)?;
             record.revoked = true;
             Ok(AdminResponse::Grant(record.public(timestamp)))
         }
-        Request::Extend { id, ttl } => {
-            policy::validate_id(&id)?;
+        Request::Extend { name, ttl } => {
+            policy::validate_name(&name)?;
             let seconds = policy::parse_ttl(&ttl)?;
-            let mut record = store.find(&id)?;
+            let mut record = store.find(&name)?;
             record.expires_at = policy::extended_expiration(&record, seconds, timestamp)?;
-            store.set_expiration(&id, record.expires_at)?;
-            Ok(AdminResponse::Grant(record.public(timestamp)))
+            let token = SecretToken::generate()?;
+            store.renew(&name, record.expires_at, &token.hash())?;
+            Ok(AdminResponse::Extended {
+                grant: record.public(timestamp),
+                token,
+            })
+        }
+        Request::Delete { name } => {
+            policy::validate_name(&name)?;
+            store.delete(&name)?;
+            Ok(AdminResponse::Deleted { name })
         }
     }
 }

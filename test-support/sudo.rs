@@ -37,25 +37,76 @@ pub(crate) fn sudo_boundary(harness: &Harness, grant: &SecretGrant) -> Result<()
         &["-n", "--", "/run/current-system/sw/bin/true"],
         b"",
     )?)?;
-    let cached_attempt = harness.sudo(&harness.admin, &["-n", "--", CLI, "grant", "list"], b"")?;
+    // Both supported administrative paths must honor the existing session.
+    let store_path = std::fs::canonicalize(CLI)?;
+    let store_path = store_path
+        .to_str()
+        .ok_or("installed executable path is not UTF-8")?;
+    for path in [CLI, store_path] {
+        let output =
+            succeeded(harness.sudo(&harness.admin, &["-n", "--", path, "grant", "list"], b"")?)?;
+        check(
+            output.contains(&grant.name),
+            "cached sudo credentials did not authorize grant management",
+        )?;
+    }
+    let created = Harness::creation_response(succeeded(harness.sudo(
+        &harness.admin,
+        &[
+            "-n",
+            "--",
+            CLI,
+            "grant",
+            "create",
+            "sudo-cache",
+            "--ttl",
+            "1m",
+            "--",
+            "id",
+        ],
+        b"",
+    )?)?)?;
+    let renewed = Harness::creation_response(succeeded(harness.sudo(
+        &harness.admin,
+        &[
+            "-n",
+            "--",
+            CLI,
+            "grant",
+            "extend",
+            &created.name,
+            "--ttl",
+            "1m",
+        ],
+        b"",
+    )?)?)?;
     check(
-        !cached_attempt.status.success(),
-        "cached ordinary-sudo timestamp authorized grant management without a fresh password",
+        renewed.name == created.name && renewed.token != created.token,
+        "cached sudo grant renewal did not preserve the name and rotate the token",
     )?;
-    denied(cached_attempt)?;
+    succeeded(harness.sudo(
+        &harness.admin,
+        &["-n", "--", CLI, "grant", "delete", &created.name],
+        b"",
+    )?)?;
+    // Password authentication is still required when no cached session exists.
+    succeeded(harness.sudo(&harness.admin, &["-k"], b"")?)?;
+    denied(harness.sudo(&harness.admin, &["-n", "--", CLI, "grant", "list"], b"")?)?;
     let output = succeeded(harness.sudo(
         &harness.admin,
         &["-S", "-p", "", "--", CLI, "grant", "list"],
         ADMIN_PASSWORD.as_bytes(),
     )?)?;
     check(
-        output.contains(&grant.id),
+        output.contains(&grant.name),
         "ordinary password-authenticated sudo did not administer grants",
     )?;
-    let second_attempt = harness.sudo(&harness.admin, &["-n", "--", CLI, "grant", "list"], b"")?;
-    check(
-        !second_attempt.status.success(),
-        "grant management reused authentication from the preceding administrative invocation",
-    )?;
-    denied(second_attempt)
+    // Authenticating for a grant also establishes a normal reusable session.
+    succeeded(harness.sudo(&harness.admin, &["-n", "--", CLI, "grant", "list"], b"")?)?;
+    succeeded(harness.sudo(
+        &harness.admin,
+        &["-n", "--", "/run/current-system/sw/bin/true"],
+        b"",
+    )?)?;
+    Ok(())
 }

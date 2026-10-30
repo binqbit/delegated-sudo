@@ -117,7 +117,15 @@ pub(crate) fn denials(harness: &Harness, grant: &SecretGrant) -> Result<()> {
     denied(harness.cli(&["exec", fake_id, "--probe"], false, Some(&grant.token))?)?;
     for command in [fake_id, "delegated-sudo"] {
         denied(harness.cli(
-            &["grant", "create", "--commands", command, "--ttl", "60m"],
+            &[
+                "grant",
+                "create",
+                "rejected-executable",
+                "--commands",
+                command,
+                "--ttl",
+                "60m",
+            ],
             true,
             None,
         )?)?;

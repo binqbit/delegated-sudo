@@ -2,6 +2,7 @@
 
 use crate::model::Request;
 use clap::{Parser, Subcommand};
+use std::io::{self, IsTerminal, Write};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -35,67 +36,109 @@ pub(super) enum Action {
 pub(super) enum GrantCommand {
     /// Grant an exact invocation, an argument prefix, or broad executable access.
     Create {
+        /// Unique grant name, used by every management command.
+        name: String,
         /// Allow arguments/subcommands for these executables; shell syntax is rejected.
-        #[arg(
-            long,
-            value_name = "EXECUTABLES",
-            required_unless_present = "command",
-            conflicts_with = "command"
-        )]
+        #[arg(long, value_name = "EXECUTABLES", conflicts_with = "command")]
         commands: Option<String>,
-        /// Grant lifetime, such as 60m or 2h.
+        /// Lifetime from now, such as 60m or 30d (maximum 30 days).
         #[arg(long)]
         ttl: String,
-        /// Executable and arguments after --; quote a final '*' to allow extra arguments.
-        #[arg(last = true, num_args = 1.., value_name = "COMMAND", required_unless_present = "commands")]
+        /// Command after --; omit to enter it interactively with a literal final *.
+        #[arg(last = true, num_args = 1.., value_name = "COMMAND")]
         command: Vec<String>,
     },
     /// List grants without their secret tokens.
     List,
-    Show {
-        grant_id: String,
-    },
-    Revoke {
-        grant_id: String,
-    },
-    /// Add time to an active grant's existing expiration.
+    /// Show a grant's command scope and expiration without its token.
+    Show { name: String },
+    /// Disable a grant and keep its record for inspection.
+    Revoke { name: String },
+    /// Delete a grant and invalidate its token; the name becomes available again.
+    Delete { name: String },
+    /// Reset an active or expired grant's lifetime from now and issue a new token.
     Extend {
-        grant_id: String,
+        name: String,
+        /// New lifetime from now, up to 30d; the previous token stops working.
         #[arg(long)]
         ttl: String,
     },
 }
 
-impl From<GrantCommand> for Request {
-    fn from(operation: GrantCommand) -> Self {
-        match operation {
+fn parse_command_line(line: &str) -> io::Result<Vec<String>> {
+    if line.chars().any(char::is_control) {
+        return Err(io::Error::other(
+            "Command must not contain control characters",
+        ));
+    }
+    let command = shlex::split(line)
+        .ok_or_else(|| io::Error::other("Command has an unfinished quote or escape"))?;
+    if command.first().is_none_or(String::is_empty) {
+        return Err(io::Error::other("A command is required"));
+    }
+    Ok(command)
+}
+
+fn read_command() -> io::Result<Vec<String>> {
+    if !io::stdin().is_terminal() {
+        return Err(io::Error::other(
+            "Provide -- COMMAND... or --commands EXECUTABLES; interactive command input requires a terminal",
+        ));
+    }
+    let mut stdout = io::stdout().lock();
+    writeln!(
+        stdout,
+        "Enter a command; a final * permits additional arguments."
+    )?;
+    write!(stdout, "Command: ")?;
+    stdout.flush()?;
+    let mut line = String::new();
+    if io::stdin().read_line(&mut line)? == 0 {
+        return Err(io::Error::other(
+            "Command input ended before a command was entered",
+        ));
+    }
+    parse_command_line(line.strip_suffix('\n').unwrap_or(&line))
+}
+
+impl GrantCommand {
+    pub(super) fn into_request(self) -> io::Result<Request> {
+        Ok(match self {
             GrantCommand::Create {
+                name,
                 commands: Some(commands),
                 ttl,
                 ..
-            } => Self::Create {
+            } => Request::Create {
+                name,
                 commands: commands.split(',').map(String::from).collect(),
                 ttl,
             },
             GrantCommand::Create {
+                name,
                 commands: None,
                 ttl,
-                command,
+                mut command,
             } => {
+                if command.is_empty() {
+                    command = read_command()?;
+                }
                 let mut command = command.into_iter();
-                Self::CreateCommand {
+                Request::CreateCommand {
+                    name,
                     command: command
                         .next()
-                        .expect("clap requires a command without --commands"),
+                        .expect("command input must contain an executable"),
                     arguments: command.collect(),
                     ttl,
                 }
             }
-            GrantCommand::List => Self::List { cursor: None },
-            GrantCommand::Show { grant_id } => Self::Show { id: grant_id },
-            GrantCommand::Revoke { grant_id } => Self::Revoke { id: grant_id },
-            GrantCommand::Extend { grant_id, ttl } => Self::Extend { id: grant_id, ttl },
-        }
+            GrantCommand::List => Request::List { cursor: None },
+            GrantCommand::Show { name } => Request::Show { name },
+            GrantCommand::Revoke { name } => Request::Revoke { name },
+            GrantCommand::Delete { name } => Request::Delete { name },
+            GrantCommand::Extend { name, ttl } => Request::Extend { name, ttl },
+        })
     }
 }
 
@@ -147,6 +190,7 @@ mod tests {
             "delegated-sudo",
             "grant",
             "create",
+            "docker-compose-codex",
             "--ttl",
             "60m",
             "--",
@@ -166,13 +210,15 @@ mod tests {
             panic!("wrong action")
         };
         let Request::CreateCommand {
+            name,
             command,
             arguments,
             ttl,
-        } = operation.into()
+        } = operation.into_request().unwrap()
         else {
             panic!("wrong scope")
         };
+        assert_eq!(name, "docker-compose-codex");
         assert_eq!(command, "docker");
         assert_eq!(
             arguments,
@@ -184,14 +230,14 @@ mod tests {
     }
 
     #[test]
-    fn create_requires_one_unambiguous_scope() {
+    fn create_requires_a_name_and_unambiguous_scope() {
         for arguments in [
             vec!["delegated-sudo", "grant", "create", "--ttl", "60m"],
-            vec!["delegated-sudo", "grant", "create", "--ttl", "60m", "--"],
             vec![
                 "delegated-sudo",
                 "grant",
                 "create",
+                "demo",
                 "--ttl",
                 "60m",
                 "docker",
@@ -201,6 +247,7 @@ mod tests {
                 "delegated-sudo",
                 "grant",
                 "create",
+                "demo",
                 "--ttl",
                 "60m",
                 "--commands",
@@ -216,6 +263,7 @@ mod tests {
             "delegated-sudo",
             "grant",
             "create",
+            "demo",
             "--ttl",
             "1m",
             "--",
@@ -226,8 +274,83 @@ mod tests {
             panic!("wrong action")
         };
         assert!(
-            matches!(Request::from(operation), Request::CreateCommand { arguments, .. } if arguments.is_empty())
+            matches!(operation.into_request().unwrap(), Request::CreateCommand { arguments, .. } if arguments.is_empty())
         );
+    }
+
+    #[test]
+    fn omitting_scope_selects_interactive_command_entry() {
+        let parsed = Cli::try_parse_from([
+            "delegated-sudo",
+            "grant",
+            "create",
+            "Docker Compose Codex",
+            "--ttl",
+            "30d",
+        ])
+        .unwrap();
+        let Action::Grant {
+            operation:
+                GrantCommand::Create {
+                    name,
+                    commands,
+                    command,
+                    ..
+                },
+        } = parsed.action
+        else {
+            panic!("wrong action")
+        };
+        assert_eq!(name, "Docker Compose Codex");
+        assert!(commands.is_none() && command.is_empty());
+    }
+
+    #[test]
+    fn interactive_command_keeps_star_and_argument_boundaries_without_evaluation() {
+        assert_eq!(
+            parse_command_line("docker compose *").unwrap(),
+            ["docker", "compose", "*"]
+        );
+        assert_eq!(
+            parse_command_line("docker compose --file 'a b.yml' \"\" *").unwrap(),
+            ["docker", "compose", "--file", "a b.yml", "", "*"]
+        );
+        assert_eq!(
+            parse_command_line("echo $HOME *.yml").unwrap(),
+            ["echo", "$HOME", "*.yml"]
+        );
+        for command in [
+            "",
+            "  ",
+            "''",
+            "docker 'unfinished",
+            "docker \\",
+            "docker\ncompose",
+            "docker\tcompose",
+        ] {
+            assert!(parse_command_line(command).is_err(), "accepted {command:?}");
+        }
+    }
+
+    #[test]
+    fn management_commands_use_the_supplied_name() {
+        for action in ["show", "revoke", "delete", "extend"] {
+            let mut arguments = vec!["delegated-sudo", "grant", action, "Docker Compose Codex"];
+            if action == "extend" {
+                arguments.extend(["--ttl", "30d"]);
+            }
+            let Action::Grant { operation } = Cli::try_parse_from(arguments).unwrap().action else {
+                panic!("wrong action")
+            };
+            let name = match operation.into_request().unwrap() {
+                Request::Show { name }
+                | Request::Revoke { name }
+                | Request::Delete { name }
+                | Request::Extend { name, .. } => name,
+                _ => panic!("wrong request"),
+            };
+            assert_eq!(name, "Docker Compose Codex");
+        }
     }
 
     #[test]
@@ -236,6 +359,7 @@ mod tests {
             "delegated-sudo",
             "grant",
             "create",
+            "docker-compose-codex",
             "--ttl",
             "60m",
             "--commands",
@@ -245,7 +369,7 @@ mod tests {
         let Action::Grant { operation } = parsed.action else {
             panic!("wrong action")
         };
-        let Request::Create { commands, .. } = operation.into() else {
+        let Request::Create { commands, .. } = operation.into_request().unwrap() else {
             panic!("wrong scope")
         };
         assert_eq!(commands, ["docker", "systemctl"]);

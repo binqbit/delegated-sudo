@@ -29,9 +29,6 @@ fn random_identifier(bytes: usize, prefix: &str) -> Result<String> {
     Ok(format!("{prefix}{}", hexadecimal(&random)))
 }
 
-pub(crate) fn grant_id() -> Result<String> {
-    random_identifier(12, "dg_")
-}
 fn hash(token: &str) -> String {
     hexadecimal(&Sha256::digest(token.as_bytes()))
 }

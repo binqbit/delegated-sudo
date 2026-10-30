@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bearer credential with no automatic debugging, formatting, serialization,
-/// or cloning. Creation output is the only UI path that exposes its contents.
+/// or cloning. Creation and renewal output explicitly expose its contents.
 pub struct SecretToken(pub(crate) String);
 
 impl SecretToken {
@@ -38,7 +38,7 @@ pub enum ArgumentPolicy {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Grant {
-    pub id: String,
+    pub name: String,
     pub allowed_executables: Vec<AllowedExecutable>,
     pub created_at: f64,
     pub expires_at: f64,
@@ -49,10 +49,12 @@ pub struct Grant {
 #[derive(Debug)]
 pub enum Request {
     Create {
+        name: String,
         commands: Vec<String>,
         ttl: String,
     },
     CreateCommand {
+        name: String,
         command: String,
         arguments: Vec<String>,
         ttl: String,
@@ -61,14 +63,17 @@ pub enum Request {
         cursor: Option<String>,
     },
     Show {
-        id: String,
+        name: String,
     },
     Revoke {
-        id: String,
+        name: String,
     },
     Extend {
-        id: String,
+        name: String,
         ttl: String,
+    },
+    Delete {
+        name: String,
     },
 }
 
@@ -76,6 +81,13 @@ pub enum AdminResponse {
     Created {
         grant: Grant,
         token: SecretToken,
+    },
+    Extended {
+        grant: Grant,
+        token: SecretToken,
+    },
+    Deleted {
+        name: String,
     },
     Grant(Grant),
     List {

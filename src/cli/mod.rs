@@ -21,32 +21,36 @@ const SUDO: &str = "/run/wrappers/bin/sudo";
 fn display_administration(mut request: Request) -> Result<i32> {
     let mut writer = io::stdout().lock();
     let mut seen_cursors = HashSet::new();
-    let mut printed = false;
+    let mut listed_grants = Vec::new();
     loop {
         match application::administer(request)? {
             AdminResponse::Created { grant, token } => {
-                output::grant(&mut writer, &grant, Some(token.expose()))?;
+                output::issued_grant(&mut writer, &grant, token.expose())?;
+                return Ok(0);
+            }
+            AdminResponse::Extended { grant, token } => {
+                writeln!(
+                    writer,
+                    "Grant renewed. The previous token is no longer valid."
+                )?;
+                output::issued_grant(&mut writer, &grant, token.expose())?;
+                return Ok(0);
+            }
+            AdminResponse::Deleted { name } => {
+                writeln!(writer, "Deleted grant: {name}")?;
                 return Ok(0);
             }
             AdminResponse::Grant(grant) => {
-                output::grant(&mut writer, &grant, None)?;
+                output::grant(&mut writer, &grant)?;
                 return Ok(0);
             }
             AdminResponse::List {
                 grants,
                 next_cursor,
             } => {
-                for grant in grants {
-                    if printed {
-                        writeln!(writer)?;
-                    }
-                    output::grant(&mut writer, &grant, None)?;
-                    printed = true;
-                }
+                listed_grants.extend(grants);
                 let Some(cursor) = next_cursor else {
-                    if !printed {
-                        writeln!(writer, "No delegation grants.")?;
-                    }
+                    output::list(&mut writer, &listed_grants, output::terminal_width())?;
                     return Ok(0);
                 };
                 if !seen_cursors.insert(cursor.clone()) {
@@ -88,7 +92,7 @@ pub fn run() -> Result<i32> {
                 )
                 .into());
             }
-            display_administration(operation.into())
+            display_administration(operation.into_request()?)
         }
         Action::Exec {
             token_stdin,

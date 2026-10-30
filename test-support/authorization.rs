@@ -31,7 +31,15 @@ pub(crate) fn rejected_commands(harness: &Harness, grant: &SecretGrant) -> Resul
     )?)?;
     denied(harness.cli(
         &[
-            "grant", "create", "--ttl", "60m", "--", PROBE, "--probe", argument,
+            "grant",
+            "create",
+            "rejected-injection",
+            "--ttl",
+            "60m",
+            "--",
+            PROBE,
+            "--probe",
+            argument,
         ],
         true,
         None,

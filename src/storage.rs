@@ -9,13 +9,64 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsE
 use std::path::Path;
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS grants (
-    id TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL,
+    name TEXT PRIMARY KEY NOT NULL, token_hash TEXT UNIQUE NOT NULL,
     allowed_executables TEXT NOT NULL, created_at REAL NOT NULL,
     expires_at REAL NOT NULL, revoked INTEGER NOT NULL DEFAULT 0
     CHECK (revoked IN (0, 1)))";
-const SELECT: &str = "SELECT id, allowed_executables, created_at, expires_at, revoked FROM grants";
+const SELECT: &str =
+    "SELECT name, allowed_executables, created_at, expires_at, revoked FROM grants";
 fn unavailable(_: impl std::fmt::Display) -> GrantError {
     GrantError("Grant storage unavailable")
+}
+
+/// The name-based format intentionally retires legacy unnamed grants. This is
+/// atomic and runs under the same exclusive lock as every grant operation.
+fn initialize(connection: &Connection) -> Result<()> {
+    let transaction = connection.unchecked_transaction().map_err(unavailable)?;
+    let version: i64 = transaction
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(unavailable)?;
+    let columns = {
+        let mut query = transaction
+            .prepare("SELECT name FROM pragma_table_info('grants') ORDER BY cid")
+            .map_err(unavailable)?;
+        query
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(unavailable)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(unavailable)?
+    };
+    let legacy = [
+        "id",
+        "token_hash",
+        "allowed_executables",
+        "created_at",
+        "expires_at",
+        "revoked",
+    ];
+    let named = [
+        "name",
+        "token_hash",
+        "allowed_executables",
+        "created_at",
+        "expires_at",
+        "revoked",
+    ];
+    match version {
+        0 if columns.is_empty() => (),
+        0 if columns == legacy => {
+            transaction
+                .execute_batch("DROP TABLE grants")
+                .map_err(unavailable)?;
+        }
+        1 if columns == named => return transaction.commit().map_err(unavailable),
+        _ => return Err(GrantError("Unsupported grant storage format")),
+    }
+    transaction.execute_batch(SCHEMA).map_err(unavailable)?;
+    transaction
+        .execute_batch("PRAGMA user_version=1")
+        .map_err(unavailable)?;
+    transaction.commit().map_err(unavailable)
 }
 
 fn private_file(path: &Path) -> Result<File> {
@@ -56,7 +107,7 @@ fn decode(row: &Row<'_>) -> rusqlite::Result<StoredGrant> {
         rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(error))
     })?;
     Ok(StoredGrant {
-        id: row.get(0)?,
+        name: row.get(0)?,
         allowed_executables,
         created_at: row.get(2)?,
         expires_at: row.get(3)?,
@@ -94,7 +145,7 @@ impl Store {
         connection
             .execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")
             .map_err(unavailable)?;
-        connection.execute_batch(SCHEMA).map_err(unavailable)?;
+        initialize(&connection)?;
         Ok(Self {
             connection,
             root_lock: Some(root_lock),
@@ -104,15 +155,21 @@ impl Store {
     pub fn insert(&self, grant: &StoredGrant, token_hash: &str) -> Result<()> {
         let allowed = serde_json::to_string(&grant.allowed_executables).map_err(unavailable)?;
         self.connection.execute(
-            "INSERT INTO grants (id, token_hash, allowed_executables, created_at, expires_at, revoked) VALUES (?, ?, ?, ?, ?, ?)",
-            params![grant.id, token_hash, allowed, grant.created_at, grant.expires_at, grant.revoked],
-        ).map_err(unavailable)?;
+            "INSERT INTO grants (name, token_hash, allowed_executables, created_at, expires_at, revoked) VALUES (?, ?, ?, ?, ?, ?)",
+            params![grant.name, token_hash, allowed, grant.created_at, grant.expires_at, grant.revoked],
+        ).map_err(|error| {
+            if error.sqlite_error().is_some_and(|error| error.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY) {
+                GrantError("A grant with this name already exists; extend it or choose another name")
+            } else {
+                unavailable(error)
+            }
+        })?;
         Ok(())
     }
 
-    pub fn find(&self, id: &str) -> Result<StoredGrant> {
+    pub fn find(&self, name: &str) -> Result<StoredGrant> {
         self.connection
-            .query_row(&format!("{SELECT} WHERE id = ?"), [id], decode)
+            .query_row(&format!("{SELECT} WHERE name = ?"), [name], decode)
             .optional()
             .map_err(unavailable)?
             .ok_or(GrantError("Grant not found"))
@@ -129,10 +186,10 @@ impl Store {
         if let Some(cursor) = cursor {
             let previous = self.find(cursor)?;
             let mut query = self.connection.prepare(&format!(
-                "{SELECT} WHERE (created_at, id) < (?, ?) ORDER BY created_at DESC, id DESC LIMIT 101"
+                "{SELECT} WHERE (created_at, name) < (?, ?) ORDER BY created_at DESC, name DESC LIMIT 101"
             )).map_err(unavailable)?;
             query
-                .query_map(params![previous.created_at, previous.id], decode)
+                .query_map(params![previous.created_at, previous.name], decode)
                 .map_err(unavailable)?
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .map_err(unavailable)
@@ -140,7 +197,7 @@ impl Store {
             let mut query = self
                 .connection
                 .prepare(&format!(
-                    "{SELECT} ORDER BY created_at DESC, id DESC LIMIT 101"
+                    "{SELECT} ORDER BY created_at DESC, name DESC LIMIT 101"
                 ))
                 .map_err(unavailable)?;
             query
@@ -151,20 +208,31 @@ impl Store {
         }
     }
 
-    pub fn revoke(&self, id: &str) -> Result<()> {
+    pub fn revoke(&self, name: &str) -> Result<()> {
         self.connection
-            .execute("UPDATE grants SET revoked = 1 WHERE id = ?", [id])
+            .execute("UPDATE grants SET revoked = 1 WHERE name = ?", [name])
             .map_err(unavailable)?;
         Ok(())
     }
 
-    pub fn set_expiration(&self, id: &str, expires_at: f64) -> Result<()> {
+    pub fn renew(&self, name: &str, expires_at: f64, token_hash: &str) -> Result<()> {
         self.connection
             .execute(
-                "UPDATE grants SET expires_at = ? WHERE id = ?",
-                params![expires_at, id],
+                "UPDATE grants SET expires_at = ?, token_hash = ? WHERE name = ?",
+                params![expires_at, token_hash, name],
             )
             .map_err(unavailable)?;
+        Ok(())
+    }
+
+    pub fn delete(&self, name: &str) -> Result<()> {
+        let deleted = self
+            .connection
+            .execute("DELETE FROM grants WHERE name = ?", [name])
+            .map_err(unavailable)?;
+        if deleted == 0 {
+            return Err(GrantError("Grant not found"));
+        }
         Ok(())
     }
 
@@ -181,7 +249,7 @@ impl Store {
     #[cfg(test)]
     pub fn in_memory() -> Self {
         let connection = Connection::open_in_memory().unwrap();
-        connection.execute_batch(SCHEMA).unwrap();
+        initialize(&connection).unwrap();
         Self {
             connection,
             root_lock: None,
@@ -189,11 +257,91 @@ impl Store {
     }
 
     #[cfg(test)]
-    pub fn saved_hash(&self, id: &str) -> String {
+    pub fn saved_hash(&self, name: &str) -> String {
         self.connection
-            .query_row("SELECT token_hash FROM grants WHERE id = ?", [id], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT token_hash FROM grants WHERE name = ?",
+                [name],
+                |row| row.get(0),
+            )
             .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NAMED_SCHEMA: &str = "CREATE TABLE grants (
+        name TEXT PRIMARY KEY NOT NULL, token_hash TEXT UNIQUE NOT NULL,
+        allowed_executables TEXT NOT NULL, created_at REAL NOT NULL,
+        expires_at REAL NOT NULL, revoked INTEGER NOT NULL DEFAULT 0
+        CHECK (revoked IN (0, 1)))";
+
+    #[test]
+    fn upgrade_retires_unnamed_grants_once_and_preserves_named_grants() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                &NAMED_SCHEMA.replace("name TEXT PRIMARY KEY NOT NULL", "id TEXT PRIMARY KEY"),
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO grants VALUES ('dg_legacy', 'old-hash', '[]', 1, 100, 0)",
+                [],
+            )
+            .unwrap();
+        initialize(&connection).unwrap();
+        let store = Store {
+            connection,
+            root_lock: None,
+        };
+        assert!(store.page(None).unwrap().is_empty());
+        assert!(store.find_hash("old-hash").unwrap().is_none());
+        let grant = StoredGrant {
+            name: "named".into(),
+            allowed_executables: vec![],
+            created_at: 1.0,
+            expires_at: 100.0,
+            revoked: false,
+        };
+        store.insert(&grant, "new-hash").unwrap();
+        initialize(&store.connection).unwrap();
+        assert_eq!(store.find_hash("new-hash").unwrap().unwrap().name, "named");
+    }
+
+    #[test]
+    fn unsupported_schema_is_not_deleted() {
+        for sql in [
+            "CREATE TABLE grants (id TEXT, unexpected TEXT); INSERT INTO grants VALUES ('keep', 'me')",
+            "CREATE TABLE grants (id TEXT, unexpected TEXT); INSERT INTO grants VALUES ('keep', 'me'); PRAGMA user_version=1",
+        ] {
+            let connection = Connection::open_in_memory().unwrap();
+            connection.execute_batch(sql).unwrap();
+            assert!(initialize(&connection).is_err());
+            let value: String = connection
+                .query_row("SELECT id FROM grants", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(value, "keep");
+        }
+    }
+
+    #[test]
+    fn failed_token_rotation_does_not_partially_change_expiration() {
+        let store = Store::in_memory();
+        let grant = StoredGrant {
+            name: "named".into(),
+            allowed_executables: vec![],
+            created_at: 1.0,
+            expires_at: 100.0,
+            revoked: false,
+        };
+        store.insert(&grant, "old-hash").unwrap();
+        store.connection.execute_batch("CREATE TRIGGER fail_renew BEFORE UPDATE ON grants BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END;").unwrap();
+        assert!(store.renew("named", 200.0, "new-hash").is_err());
+        assert_eq!(store.find("named").unwrap().expires_at, 100.0);
+        assert!(store.find_hash("old-hash").unwrap().is_some());
+        assert!(store.find_hash("new-hash").unwrap().is_none());
     }
 }

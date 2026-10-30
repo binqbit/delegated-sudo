@@ -1,8 +1,9 @@
 //! Real controlling-terminal coverage of the default hidden-token input path.
 
 use crate::Result;
-use crate::harness::{CLI, Harness, SecretGrant, check};
+use crate::harness::{CLI, Harness, PROBE, SecretGrant, check, denied, succeeded};
 use crate::process::configure;
+use serde_json::{Value, json};
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -90,7 +91,7 @@ fn terminal_pair(harness: &Harness) -> Result<(File, File)> {
     Ok((master, slave))
 }
 
-fn drain(master: &mut File, transcript: &mut Vec<u8>, secret: &str) -> Result<()> {
+fn drain(master: &mut File, transcript: &mut Vec<u8>, secret: Option<&str>) -> Result<()> {
     let mut buffer = [0u8; 2048];
     loop {
         match master.read(&mut buffer) {
@@ -99,14 +100,16 @@ fn drain(master: &mut File, transcript: &mut Vec<u8>, secret: &str) -> Result<()
                 transcript.extend_from_slice(&buffer[..count]);
                 check(
                     transcript.len() <= 16 * 1024,
-                    "interactive token output exceeded its bound",
+                    "interactive terminal output exceeded its bound",
                 )?;
-                check(
-                    !transcript
-                        .windows(secret.len())
-                        .any(|window| window == secret.as_bytes()),
-                    "interactive token was echoed to the terminal",
-                )?;
+                if let Some(secret) = secret {
+                    check(
+                        !transcript
+                            .windows(secret.len())
+                            .any(|window| window == secret.as_bytes()),
+                        "interactive token was echoed to the terminal",
+                    )?;
+                }
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error)
@@ -170,7 +173,7 @@ pub(crate) fn interactive_token(harness: &Harness, grant: &SecretGrant) -> Resul
     let mut transcript = Vec::new();
     let mut supplied = false;
     loop {
-        drain(&mut master, &mut transcript, &grant.token)?;
+        drain(&mut master, &mut transcript, Some(&grant.token))?;
         if !supplied
             && transcript
                 .windows(PROMPT.len())
@@ -183,7 +186,7 @@ pub(crate) fn interactive_token(harness: &Harness, grant: &SecretGrant) -> Resul
         }
         if let Some(status) = running.child.try_wait()? {
             running.reaped = true;
-            drain(&mut master, &mut transcript, &grant.token)?;
+            drain(&mut master, &mut transcript, Some(&grant.token))?;
             check(
                 supplied,
                 "default token prompt did not accept hidden terminal input",
@@ -206,6 +209,103 @@ pub(crate) fn interactive_token(harness: &Harness, grant: &SecretGrant) -> Resul
         };
         // SAFETY: poll points to one valid descriptor record, and its short
         // timeout keeps both process-exit checks and the absolute deadline live.
+        if unsafe { libc::poll(&mut poll, 1, 20) } < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error.into());
+            }
+        }
+    }
+}
+
+/// Create through the real terminal command prompt. Files in cwd ensure that a
+/// bare star would narrow the grant incorrectly if a shell expanded the input.
+pub(crate) fn interactive_creation(harness: &Harness) -> Result<()> {
+    const COMMAND_PROMPT: &[u8] = b"Command: ";
+    let fixture = harness.agent.home.join("interactive-glob-file");
+    std::fs::write(&fixture, b"glob expansion fixture")?;
+    let (mut master, slave) = terminal_pair(harness)?;
+    let mut command = Command::new(CLI);
+    command
+        .args(["grant", "create", "interactive-prefix", "--ttl", "30d"])
+        .env_clear()
+        .env("PATH", "/run/current-system/sw/bin:/run/wrappers/bin")
+        .env("HOME", "/root")
+        .env("TERM", "dumb")
+        .current_dir(&harness.agent.home)
+        .stdin(Stdio::from(slave.try_clone()?))
+        .stdout(Stdio::from(slave.try_clone()?))
+        .stderr(Stdio::from(slave));
+    // SAFETY: only async-signal-safe session and terminal syscalls after fork.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 || libc::ioctl(libc::STDIN_FILENO, libc::TIOCSCTTY, 0) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut running = RunningChild {
+        child: command.spawn()?,
+        reaped: false,
+    };
+    drop(command);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut transcript = Vec::new();
+    let mut supplied = false;
+    loop {
+        drain(&mut master, &mut transcript, None)?;
+        if !supplied
+            && transcript
+                .windows(COMMAND_PROMPT.len())
+                .any(|part| part == COMMAND_PROMPT)
+        {
+            master.write_all(format!("{PROBE} --probe 'first second' *\n").as_bytes())?;
+            supplied = true;
+        }
+        if let Some(status) = running.child.try_wait()? {
+            running.reaped = true;
+            drain(&mut master, &mut transcript, None)?;
+            check(supplied, "grant creation did not prompt for its command")?;
+            check(status.success(), "interactive grant creation failed")?;
+            let grant = Harness::creation_response(String::from_utf8(transcript)?)?;
+            check(
+                grant.name == "interactive-prefix",
+                "interactive grant lost its name",
+            )?;
+            for suffix in [vec![], vec!["additional", "two words", ""]] {
+                let mut arguments = vec!["exec", PROBE, "--probe", "first second"];
+                arguments.extend_from_slice(&suffix);
+                let report: Value = serde_json::from_str(&succeeded(harness.cli(
+                    &arguments,
+                    false,
+                    Some(&grant.token),
+                )?)?)?;
+                let mut expected = vec!["first second"];
+                expected.extend_from_slice(&suffix);
+                check(
+                    report["args"] == json!(expected),
+                    "bare interactive star did not allow suffix arguments",
+                )?;
+            }
+            denied(harness.cli(
+                &["exec", PROBE, "--probe", "wrong-prefix"],
+                false,
+                Some(&grant.token),
+            )?)?;
+            std::fs::remove_file(fixture)?;
+            return Ok(());
+        }
+        check(
+            Instant::now() < deadline,
+            "interactive grant creation PTY timed out",
+        )?;
+        let mut poll = libc::pollfd {
+            fd: master.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll has one initialized descriptor record and bounded wait.
         if unsafe { libc::poll(&mut poll, 1, 20) } < 0 {
             let error = io::Error::last_os_error();
             if error.kind() != io::ErrorKind::Interrupted {

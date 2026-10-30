@@ -3,7 +3,7 @@
 use crate::model::{AllowedExecutable, ArgumentPolicy, Grant};
 use std::{error::Error, fmt};
 
-pub(crate) const MAX_TTL: u64 = 7 * 24 * 60 * 60;
+pub(crate) const MAX_TTL: u64 = 30 * 24 * 60 * 60;
 
 #[derive(Debug)]
 pub struct GrantError(pub(crate) &'static str);
@@ -16,7 +16,7 @@ impl Error for GrantError {}
 pub(crate) type Result<T> = std::result::Result<T, GrantError>;
 
 pub(crate) struct StoredGrant {
-    pub id: String,
+    pub name: String,
     pub allowed_executables: Vec<AllowedExecutable>,
     pub created_at: f64,
     pub expires_at: f64,
@@ -26,7 +26,7 @@ pub(crate) struct StoredGrant {
 impl StoredGrant {
     pub fn public(&self, timestamp: f64) -> Grant {
         Grant {
-            id: self.id.clone(),
+            name: self.name.clone(),
             allowed_executables: self.allowed_executables.clone(),
             created_at: self.created_at,
             expires_at: self.expires_at,
@@ -61,19 +61,19 @@ pub(crate) fn parse_ttl(value: &str) -> Result<u64> {
         return Err(bad());
     }
     if seconds > MAX_TTL {
-        return Err(GrantError("TTL must not exceed seven days"));
+        return Err(GrantError("TTL must not exceed 30 days"));
     }
     Ok(seconds)
 }
 
-pub(crate) fn validate_id(id: &str) -> Result<()> {
-    if id.len() != 27
-        || !id.starts_with("dg_")
-        || !id.as_bytes()[3..]
-            .iter()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+pub(crate) fn validate_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.starts_with('-')
+        || name.trim() != name
+        || name.chars().count() > 80
+        || name.chars().any(|c| c.is_control() || matches!(c, '\u{061c}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}'))
     {
-        return Err(GrantError("Invalid grant ID"));
+        return Err(GrantError("Grant name must contain 1 to 80 characters, without a leading dash, surrounding whitespace, control characters, or invisible formatting"));
     }
     Ok(())
 }
@@ -119,14 +119,10 @@ pub(crate) fn extended_expiration(
     seconds: u64,
     timestamp: f64,
 ) -> Result<f64> {
-    if record.revoked || timestamp >= record.expires_at {
-        return Err(GrantError("Only an active grant can be extended"));
-    }
-    let expires_at = record.expires_at + seconds as f64;
-    if expires_at - timestamp > MAX_TTL as f64 {
+    if record.revoked {
         return Err(GrantError(
-            "Remaining grant lifetime must not exceed seven days",
+            "A revoked grant cannot be extended; delete it and create a new grant",
         ));
     }
-    Ok(expires_at)
+    Ok(timestamp + seconds as f64)
 }

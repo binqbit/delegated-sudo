@@ -14,7 +14,15 @@ fn allowed() -> Vec<AllowedExecutable> {
     }]
 }
 fn create(store: &storage::Store, timestamp: f64) -> (Grant, credentials::SecretToken) {
-    match application::create_grant(store, allowed(), 60, timestamp).unwrap() {
+    match application::create_grant(
+        store,
+        format!("test-{}", timestamp),
+        allowed(),
+        60,
+        timestamp,
+    )
+    .unwrap()
+    {
         AdminResponse::Created { grant, token } => (grant, token),
         _ => panic!("unexpected creation result"),
     }
@@ -26,7 +34,7 @@ fn ttl_validation_has_finite_bounds() {
         ("1s", 1),
         ("60m", 3600),
         ("2h", 7200),
-        ("7d", policy::MAX_TTL),
+        ("30d", policy::MAX_TTL),
     ] {
         assert_eq!(policy::parse_ttl(input).unwrap(), expected);
     }
@@ -39,7 +47,8 @@ fn ttl_validation_has_finite_bounds() {
         "1.5h",
         "1 h",
         "1H",
-        "8d",
+        "31d",
+        "2592001s",
         "999999999999999s",
         "яs",
     ] {
@@ -55,7 +64,7 @@ fn grants_store_only_hashes_and_match_exact_executables() {
     let store = storage::Store::in_memory();
     let (grant, token) = create(&store, 1000.0);
     assert_eq!(
-        store.saved_hash(&grant.id),
+        store.saved_hash(&grant.name),
         credentials::lookup_hash(token.expose()).unwrap()
     );
     assert!(
@@ -75,42 +84,161 @@ fn grants_store_only_hashes_and_match_exact_executables() {
 }
 
 #[test]
-fn extension_is_additive_and_never_revives_grants() {
+fn renewal_rotates_tokens_and_sets_a_new_deadline_from_now() {
     let store = storage::Store::in_memory();
-    let (grant, _) = create(&store, 1000.0);
-    let extend = |ttl: &str, timestamp| {
-        application::dispatch(
+    let (original, mut old_token) = create(&store, 1000.0);
+    let before = serde_json::to_string(&original.allowed_executables).unwrap();
+    // Active renewal can shorten the remaining lifetime; renewal at/after expiry
+    // revives the same named grant. Every renewal invalidates the previous token.
+    for (timestamp, ttl, seconds) in [
+        (1010.0, "1s", 1.0),
+        (1011.0, "30d", policy::MAX_TTL as f64),
+        (3_000_000.0, "60m", 3600.0),
+    ] {
+        let AdminResponse::Extended { grant, token } = application::dispatch(
             &store,
             Request::Extend {
-                id: grant.id.clone(),
+                name: original.name.clone(),
                 ttl: ttl.into(),
             },
             timestamp,
         )
-    };
-    match extend("30s", 1010.0).unwrap() {
-        AdminResponse::Grant(grant) => assert_eq!(grant.expires_at, 1090.0),
-        _ => panic!("unexpected extension result"),
+        .unwrap() else {
+            panic!("unexpected renewal result")
+        };
+        assert_eq!(grant.name, original.name);
+        assert_eq!(grant.created_at, original.created_at);
+        assert_eq!(
+            serde_json::to_string(&grant.allowed_executables).unwrap(),
+            before
+        );
+        assert_eq!(grant.expires_at, timestamp + seconds);
+        assert!(grant.active);
+        assert!(store.find_hash(&old_token.hash()).unwrap().is_none());
+        let current = store.find_hash(&token.hash()).unwrap().unwrap();
+        assert!(policy::authorize(&current, "id", &[], timestamp).is_ok());
+        assert!(policy::authorize(&current, "id", &[], grant.expires_at).is_err());
+        old_token = token;
     }
-    assert!(extend("7d", 1010.0).is_err());
-    assert!(extend("30s", 1090.0).is_err());
+}
+
+#[test]
+fn invalid_renewal_leaves_the_token_and_deadline_unchanged() {
+    let store = storage::Store::in_memory();
+    let (grant, token) = create(&store, 1000.0);
+    for name in [grant.name.as_str(), "missing"] {
+        for ttl in ["0s", "31d", "invalid"] {
+            assert!(
+                application::dispatch(
+                    &store,
+                    Request::Extend {
+                        name: name.into(),
+                        ttl: ttl.into()
+                    },
+                    1010.0
+                )
+                .is_err()
+            );
+        }
+    }
+    assert_eq!(
+        store.find(&grant.name).unwrap().expires_at,
+        grant.expires_at
+    );
+    assert!(store.find_hash(&token.hash()).unwrap().is_some());
     application::dispatch(
         &store,
         Request::Revoke {
-            id: grant.id.clone(),
+            name: grant.name.clone(),
         },
         1010.0,
     )
     .unwrap();
-    assert!(extend("30s", 1010.0).is_err());
-    assert!(policy::authorize(&store.find(&grant.id).unwrap(), "id", &[], 1010.0).is_err());
+    assert!(
+        application::dispatch(
+            &store,
+            Request::Extend {
+                name: grant.name.clone(),
+                ttl: "1d".into()
+            },
+            1010.0
+        )
+        .is_err()
+    );
+    assert_eq!(
+        store.find(&grant.name).unwrap().expires_at,
+        grant.expires_at
+    );
+    assert!(policy::authorize(&store.find(&grant.name).unwrap(), "id", &[], 1010.0).is_err());
+}
+
+#[test]
+fn unique_names_are_required_and_duplicate_creation_preserves_the_original() {
+    let store = storage::Store::in_memory();
+    let (grant, token) = create(&store, 1000.0);
+    let error = application::create_grant(&store, grant.name.clone(), allowed(), 100, 1100.0)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("already exists"));
+    assert_eq!(
+        store.find(&grant.name).unwrap().expires_at,
+        grant.expires_at
+    );
+    assert!(store.find_hash(&token.hash()).unwrap().is_some());
+    for name in [
+        "",
+        " ",
+        "-option",
+        " leading",
+        "trailing ",
+        "line\nbreak",
+        "escape\x1b",
+        "hidden\u{202e}",
+    ] {
+        assert!(application::create_grant(&store, name.into(), allowed(), 60, 1000.0).is_err());
+    }
+    assert!(policy::validate_name(&"a".repeat(81)).is_err());
+    assert!(policy::validate_name(&"і".repeat(80)).is_ok());
+    for name in [
+        "Docker Compose Codex",
+        "Розгортання",
+        "O'Reilly",
+        "Case",
+        "case",
+    ] {
+        application::create_grant(&store, name.into(), allowed(), 60, 1000.0).unwrap();
+        assert_eq!(store.find(name).unwrap().name, name);
+    }
+}
+
+#[test]
+fn deletion_removes_expired_or_active_grants_and_invalidates_tokens() {
+    let store = storage::Store::in_memory();
+    for timestamp in [1010.0, 2000.0] {
+        let (grant, token) = create(&store, 1000.0);
+        let response = application::dispatch(
+            &store,
+            Request::Delete {
+                name: grant.name.clone(),
+            },
+            timestamp,
+        )
+        .unwrap();
+        assert!(matches!(response, AdminResponse::Deleted { name } if name == grant.name));
+        assert!(store.find(&grant.name).is_err());
+        assert!(store.find_hash(&token.hash()).unwrap().is_none());
+        assert!(
+            application::dispatch(&store, Request::Delete { name: grant.name }, timestamp).is_err()
+        );
+        assert!(store.page(None).unwrap().is_empty());
+    }
 }
 
 #[test]
 fn list_paginates_without_losing_or_repeating_records() {
     let store = storage::Store::in_memory();
-    for _ in 0..205 {
-        create(&store, 1000.0);
+    for index in 0..205 {
+        application::create_grant(&store, format!("test-{index}"), allowed(), 60, 1000.0).unwrap();
     }
     let mut cursor = None;
     let mut ids = std::collections::HashSet::new();
@@ -123,7 +251,7 @@ fn list_paginates_without_losing_or_repeating_records() {
             panic!("unexpected list result")
         };
         for grant in grants {
-            assert!(ids.insert(grant.id));
+            assert!(ids.insert(grant.name));
         }
         cursor = next_cursor;
         if cursor.is_none() {
@@ -141,7 +269,7 @@ fn oversized_grant_is_rejected_before_persistence() {
         path: "/nix/store/example-coreutils/bin/id".into(),
         argument_policy: ArgumentPolicy::Exact(vec!["x".repeat(64 * 1024)]),
     }];
-    assert!(application::create_grant(&store, commands, 60, 1000.0).is_err());
+    assert!(application::create_grant(&store, "oversized".into(), commands, 60, 1000.0).is_err());
     assert!(store.page(None).unwrap().is_empty());
 }
 

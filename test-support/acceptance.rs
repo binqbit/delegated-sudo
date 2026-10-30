@@ -29,6 +29,8 @@ fn acceptance() -> Result<()> {
         agent: process::Account::named("agent")?,
         admin: process::Account::named("admin")?,
     };
+    storage::legacy_upgrade(&harness)?;
+    println!("passed: on-disk legacy upgrade retires old tokens and preserves new named grants");
     let main = harness.create("id,cat,delegated-sudo-check", "60m")?;
     grants::administration(&harness, &main)?;
     println!("passed: administrative authorization and inspection");
@@ -50,10 +52,18 @@ fn acceptance() -> Result<()> {
     println!("passed: exact command arguments, order, empty values and pinned path");
     prefix::command(&harness)?;
     println!("passed: fixed argument prefixes with optional suffixes and shell-syntax rejection");
+    terminal::interactive_creation(&harness)?;
+    println!(
+        "passed: interactive creation preserves bare star and quoted arguments without glob expansion"
+    );
     lifecycle::revoke_running_command(&harness)?;
     println!("passed: grant lock released at exec and existing command survives revocation");
     grants::expiration_and_extension(&harness)?;
-    println!("passed: expiration prevents execution and extension preserves it");
+    println!(
+        "passed: active and expired renewal resets expiry and rotates tokens within thirty days"
+    );
+    grants::names_and_deletion(&harness)?;
+    println!("passed: unique Unicode grant names, deletion and safe name reuse");
     grants::listing(&harness)?;
     println!("passed: complete listing of more than one hundred grants");
     Ok(())

@@ -4,6 +4,7 @@ use crate::Result;
 use crate::process::{Account, capture, configure};
 use std::io;
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(crate) const CLI: &str = "/run/current-system/sw/bin/delegated-sudo";
 const SUDO: &str = "/run/wrappers/bin/sudo";
@@ -20,7 +21,7 @@ pub(crate) fn check(condition: bool, message: &'static str) -> Result<()> {
 
 // Deliberately no Debug implementation: assertion failures must not print tokens.
 pub(crate) struct SecretGrant {
-    pub(crate) id: String,
+    pub(crate) name: String,
     pub(crate) token: String,
 }
 
@@ -78,8 +79,25 @@ impl Harness {
     }
 
     pub(crate) fn create(&self, commands: &str, ttl: &str) -> Result<SecretGrant> {
+        self.create_named(&fixture_name(), commands, ttl)
+    }
+
+    pub(crate) fn create_named(
+        &self,
+        name: &str,
+        commands: &str,
+        ttl: &str,
+    ) -> Result<SecretGrant> {
         let output = succeeded(self.cli(
-            &["grant", "create", "--commands", commands, "--ttl", ttl],
+            &[
+                "grant",
+                "create",
+                name,
+                "--commands",
+                commands,
+                "--ttl",
+                ttl,
+            ],
             true,
             None,
         )?)?;
@@ -87,12 +105,13 @@ impl Harness {
     }
 
     pub(crate) fn create_command(&self, command: &[&str], ttl: &str) -> Result<SecretGrant> {
-        let mut arguments = vec!["grant", "create", "--ttl", ttl, "--"];
+        let name = fixture_name();
+        let mut arguments = vec!["grant", "create", &name, "--ttl", ttl, "--"];
         arguments.extend_from_slice(command);
         Self::creation_response(succeeded(self.cli(&arguments, true, None)?)?)
     }
 
-    fn creation_response(output: String) -> Result<SecretGrant> {
+    pub(crate) fn creation_response(output: String) -> Result<SecretGrant> {
         let field = |prefix: &str| {
             output
                 .lines()
@@ -103,8 +122,12 @@ impl Harness {
                 .ok_or_else(|| io::Error::other("missing creation field"))
         };
         Ok(SecretGrant {
-            id: field("Grant ID:")?,
-            token: field("Token:")?,
+            name: field("delegated-sudo grant ")?
+                .strip_suffix(':')
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| io::Error::other("invalid grant heading"))?
+                .to_owned(),
+            token: field("- token:")?,
         })
     }
 
@@ -124,6 +147,11 @@ impl Harness {
         configure(&mut command, Some(account));
         capture(command, stdin)
     }
+}
+
+fn fixture_name() -> String {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    format!("fixture-{:04}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 pub(crate) fn succeeded(output: Output) -> Result<String> {

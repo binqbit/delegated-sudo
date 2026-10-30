@@ -8,7 +8,7 @@ fn args(values: &[&str]) -> Vec<String> {
 }
 fn record(argument_policy: ArgumentPolicy) -> StoredGrant {
     StoredGrant {
-        id: "dg_000000000000000000000000".into(),
+        name: "docker-test".into(),
         allowed_executables: vec![AllowedExecutable {
             name: "docker".into(),
             path: "/nix/store/example/bin/docker".into(),
@@ -124,6 +124,7 @@ fn shell_grammar_is_rejected_at_creation_and_execution_boundaries() {
             assert!(
                 application::create_grant(
                     &store,
+                    "invalid".into(),
                     record(argument_policy).allowed_executables,
                     60,
                     1000.0
@@ -154,7 +155,7 @@ fn shell_grammar_is_rejected_at_creation_and_execution_boundaries() {
 #[test]
 fn persisted_argument_policies_keep_their_authorization_scope() {
     let store = storage::Store::in_memory();
-    for (mode, permitted, rejected) in [
+    for (index, (mode, permitted, rejected)) in [
         (ArgumentPolicy::Any, args(&["compose", "down"]), None),
         (
             ArgumentPolicy::Exact(Vec::new()),
@@ -166,14 +167,21 @@ fn persisted_argument_policies_keep_their_authorization_scope() {
             args(&["compose", "up"]),
             Some(args(&["run"])),
         ),
-    ] {
-        let AdminResponse::Created { grant, .. } =
-            application::create_grant(&store, record(mode).allowed_executables, 60, 1000.0)
-                .unwrap()
-        else {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let AdminResponse::Created { grant, .. } = application::create_grant(
+            &store,
+            format!("test-{index}"),
+            record(mode).allowed_executables,
+            60,
+            1000.0,
+        )
+        .unwrap() else {
             panic!("unexpected creation result")
         };
-        let saved = store.find(&grant.id).unwrap();
+        let saved = store.find(&grant.name).unwrap();
         assert!(accepts(&saved, &permitted));
         if let Some(rejected) = rejected {
             assert!(!accepts(&saved, &rejected));

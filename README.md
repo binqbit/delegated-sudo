@@ -3,10 +3,10 @@
 Give an agent or another local process temporary permission to run selected
 commands as root, without sharing your system password.
 
-An administrator creates a **grant**: a permitted command, an expiration time,
-and a random secret token. The holder presents that token on each execution.
+An administrator creates a **named grant**: a permitted command, an expiration
+time, and a random secret token. The holder presents that token on each execution.
 The application checks the grant and runs the permitted command directly.
-Only token hashes are stored; the secret is shown once when the grant is created.
+Only token hashes are stored; the secret is shown once when the grant is created or renewed.
 
 The application is a single Rust binary. This build targets NixOS and uses
 ordinary sudo to obtain root privileges. Installation must establish the access
@@ -19,17 +19,17 @@ System authorization and delegation have separate responsibilities:
 | Who | Entry point | Required system authorization |
 | --- | --- | --- |
 | Intended token users | The installed `delegated-sudo` binary followed by `exec ...` | May run this entry point as root without a system password; a valid token is still required |
-| Trusted administrators | `delegated-sudo grant create/list/show/extend/revoke` | Ordinary administrative sudo access, with fresh system authentication for each invocation |
+| Trusted administrators | `delegated-sudo grant create/list/show/extend/revoke/delete` | Ordinary administrative sudo access, including its normal credential cache |
 
 Your installation or configuration must enforce these conditions:
 
 - Authorize the exact trusted binary and its `exec` entry point. Do not give
   token users unrestricted sudo, passwordless `grant` access, or permission to
   replace the binary. They do not need membership in an administrator group.
-- Require fresh system authentication for grant management even when sudo has
-  cached credentials. The system verifies the administrator's password; this
-  application handles only delegation tokens. An existing root session already
-  has administrative authority.
+- Use ordinary sudo authentication and its configured credential cache for grant
+  management. Do not force reauthentication or reset the existing sudo session.
+  The system verifies the administrator's password; this application handles only
+  delegation tokens. An existing root session already has administrative authority.
 - Apply the rules to the paths users actually invoke, including supported
   aliases. Keep the installed binary and authorization rules synchronized, and
   check that broader rules do not override the intended restrictions.
@@ -44,29 +44,47 @@ remain the same.
 
 ## Grant a command
 
-Prefer a grant for the exact operation the holder needs:
+Every grant requires a unique name. Use a short descriptive name such as
+`docker-compose-codex`, or quote a name containing spaces: `"Docker Compose Codex"`.
+Names are case-sensitive, accept up to 80 characters, and cannot start with a dash
+or contain control characters, invisible formatting, or leading/trailing whitespace.
+
+To enter a command naturally, start creation without a command argument:
 
 ```bash
-sudo delegated-sudo grant create --ttl 60m -- docker compose up -d
+sudo delegated-sudo grant create docker-compose-codex --ttl 30d
 ```
 
-This permits exactly `docker compose up -d`. Changed subcommands, flags, argument
-order, or additional arguments are rejected.
+At the `Command:` prompt, enter:
 
-To permit extra parameters after a fixed beginning, add a final quoted `'*'`:
+```text
+docker compose *
+```
+
+The final `*` permits zero or more additional arguments. At this prompt it needs
+no quotes or escaping and is never expanded to filenames. Quotes group arguments
+containing spaces, such as `docker compose --file 'a b.yml' *`. This input is parsed
+as arguments; it does not execute a shell, substitute variables, or expand globs.
+Interactive entry requires a terminal.
+
+For scripts or a single shell command, provide the invocation after `--`:
 
 ```bash
-sudo delegated-sudo grant create --ttl 60m -- docker compose up -d '*'
+sudo delegated-sudo grant create deploy --ttl 60m -- docker compose up -d
+sudo delegated-sudo grant create compose --ttl 30d -- docker compose \*
 ```
 
-This also permits `docker compose up -d my-service`, while the fixed beginning
-must still match. Quote the star so your shell does not expand it. It belongs in
-the grant definition, not in the command used to execute the operation.
+The first grant permits exactly `docker compose up -d`. Changed subcommands,
+flags, argument order, or additional arguments are rejected. The second permits
+any arguments after `docker compose`. The backslash protects the star from the
+calling shell; quotes are optional. A bare `*` on a Bash/Zsh command line is
+expanded by that shell before this application starts. Use the interactive prompt
+for a bare star. The marker belongs only in the grant definition, not in execution.
 
 For a holder trusted with every operation of an executable, use the broader mode:
 
 ```bash
-sudo delegated-sudo grant create --commands docker,systemctl --ttl 60m
+sudo delegated-sudo grant create maintenance --commands docker,systemctl --ttl 30d
 ```
 
 This permits arbitrary subcommands and arguments, subject to the shell-syntax
@@ -76,9 +94,19 @@ Commands must be available in the system profile or supplied by an absolute Nix
 store path. Each grant records the executable's resolved identity; a replacement
 from the holder's PATH cannot take its place. The application cannot grant itself.
 
-Creation prints the grant ID, permitted command scope, expiration, and token.
+Creation prints a compact block:
+
+```text
+delegated-sudo grant docker-compose-codex:
+- command: docker compose *
+- token: <secret token>
+- expires: <expiration date and time in UTC>
+```
+
+The command includes the complete fixed arguments and any final `*` marker.
 Pass the token privately to its intended holder. Anyone who obtains it can use
-it; tokens are not tied to a username or process.
+it; tokens are not tied to a username or process. The name identifies the grant
+for administration; only its secret token authorizes execution.
 
 ## Use and manage grants
 
@@ -91,7 +119,7 @@ delegated-sudo exec docker compose up -d
 ```
 
 The application elevates through its configured entry point and asks for
-`Delegation token:` with hidden input. Use the granted name or its recorded
+`Delegation token:` with hidden input. Use the executable name or its recorded
 executable path. The command inherits the working directory and standard streams
 and runs with a clean root environment.
 
@@ -104,20 +132,37 @@ delegated-sudo exec --token-stdin docker compose up -d < /private/path/token
 Remaining stdin is passed to the command. Tokens are not accepted in command
 arguments or environment variables. Keep token files private.
 
-Administrators can inspect, extend, or revoke grants:
+Administrators manage grants by their unique names:
 
 ```bash
 sudo delegated-sudo grant list
-sudo delegated-sudo grant show dg_REPLACE_WITH_GRANT_ID
-sudo delegated-sudo grant extend dg_REPLACE_WITH_GRANT_ID --ttl 30m
-sudo delegated-sudo grant revoke dg_REPLACE_WITH_GRANT_ID
+sudo delegated-sudo grant show docker-compose-codex
+sudo delegated-sudo grant extend docker-compose-codex --ttl 30d
+sudo delegated-sudo grant revoke docker-compose-codex
+sudo delegated-sudo grant delete docker-compose-codex
 ```
 
-TTL accepts a positive integer followed by `s`, `m`, `h`, or `d`, up to seven
-days. Extension adds time to the existing expiration, with at most seven days
-remaining. Expired or revoked grants cannot be reactivated. To narrow a grant
-or replace a lost token, revoke it and create another. Inspection never reveals
-the token or its hash.
+`list` shows names, full permitted commands, expiration times in UTC, and
+`active`, `expired`, or `revoked` status. It uses a compact table when fields fit
+and labeled rows for narrow terminals or long names/commands. `show` also gives
+the recorded executable paths and exact argument policy. Neither exposes tokens
+or hashes.
+
+TTL accepts a positive integer followed by `s`, `m`, `h`, or `d`, up to **30 days**
+(`30d`). A day is 24 hours; the maximum is a fixed duration, not a calendar month.
+`extend` sets expiration to the current time plus the supplied TTL, whether the
+grant is active or expired. It issues and displays a new token; the previous token
+immediately stops working. The name, command scope, and original
+creation time stay unchanged. A revoked grant cannot be renewed.
+
+`revoke` disables a grant but keeps it visible for inspection. `delete` removes
+its record and invalidates its token; its name can then be used for a new grant.
+Expired grants remain visible until deleted. To change command scope, delete the
+grant and create a new one with the desired command.
+
+When upgrading from the old ID-based format, existing unnamed grants are removed
+on the first access to storage by the new version. Their tokens stop working.
+Create replacement grants with explicit names; there is no ID-based management.
 
 ## What the grant controls
 
@@ -133,7 +178,8 @@ root access. Extra parameters, working directories, and configuration files can
 also change an operation's effects. Trust the holder with those capabilities;
 use exact grants and administrator-controlled inputs when the scope must be narrow.
 
-Expiration and revocation prevent new launches. They do not stop existing
+Expiration, renewal, revocation, and deletion prevent new launches with old or
+inactive tokens. They do not stop existing
 processes or undo changes. Grants follow the system clock and remain tied to the
 recorded executable version; if it is removed, create a new grant for its replacement.
 

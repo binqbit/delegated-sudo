@@ -18,12 +18,15 @@ the user supplies; do not probe other commands to discover access.
 | User permission / grant scope | Allowed invocation |
 | --- | --- |
 | Only `docker compose up -d` / `Scope: EXACT docker compose up -d` | Exactly that executable and those arguments, in that order. No added flags, service names, or changed subcommands. |
-| `docker compose up -d` with additional arguments allowed / `Scope: PREFIX docker compose up -d '*'` | Keep the entire prefix; append zero or more arguments within the user's stated limits, e.g. `docker compose up -d web`. Do not change the prefix to `compose down` or insert flags into it. |
+| `docker compose up -d` with additional arguments allowed / `Scope: PREFIX docker compose up -d *` | Keep the entire prefix; append zero or more arguments within the user's stated limits, e.g. `docker compose up -d web`. Do not change the prefix to `compose down` or insert flags into it. |
 | Explicit permission for any Docker operation / `Scope: ANY arguments and subcommands` for `docker` | Choose Docker arguments and subcommands needed for the authorized task. This does not authorize another executable. |
 
 A specific command without permission to vary arguments means exact access.
 If permission to vary arguments leaves the fixed part unclear, clarify that boundary.
 `Commands: docker` alone does not establish broad access; use its `Scope:` detail.
+Creation and renewal instead show `- command:` with the full command scope:
+`docker compose up -d` is exact, `docker compose *` allows extra arguments after
+`compose`, and `docker *` allows any arguments for Docker.
 The final `*` in a prefix scope marks permission to append arguments: omit it
 from execution; it is not a shell glob or a placeholder inside an argument.
 
@@ -40,8 +43,10 @@ Do not pass the whole invocation as one quoted string. In shell-based tools,
 quote each argument that needs it: `'release candidate'` is one argument, while
 `release candidate` is two. Prefer an argument array when the tool supports one.
 
-Run from the intended working directory; the command inherits it. Do not append
-shell chains, substitutions, or a shell wrapper to obtain additional execution.
+Run from the intended working directory; the command inherits it.
+
+Do not append shell chains, substitutions, or a shell wrapper to obtain additional
+execution.
 The CLI rejects `;`, `&`, `|`, `<`, `>`, backticks, `$(`, `${`, and control characters
 in command arguments, even when quoted. Allowed program options or configuration
 files can also execute code; keep their effects within the authorized task.
@@ -49,8 +54,8 @@ files can also execute code; keep their effects within the authorized task.
 ## Supply or save the token
 
 Use the raw token: `dst_` followed by 64 lowercase hexadecimal characters.
-A `dg_...` grant ID or token hash cannot authenticate. Do not include the
-`Token:` label, quotes, or spaces around the token.
+A grant name or token hash cannot authenticate. Do not include the
+`- token:` label, quotes, or spaces around the token.
 
 With a terminal (PTY):
 
@@ -82,6 +87,8 @@ command. A token-only file leaves the command at EOF. Do not use `--token-stdin`
 on an echoing PTY. Supply the token on every invocation; there is no token login
 session.
 
-If access expires, is revoked, or the command is rejected, report the rejection
-and request valid access for the required operation. Do not fall back to ordinary
-sudo or create, inspect, extend, or revoke grants as part of this execution skill.
+If access expires, is revoked/deleted, or the command is rejected, report the
+rejection and request valid access for the required operation. Renewing a grant
+replaces its token immediately; the previous token no longer authenticates.
+Do not fall back to ordinary sudo or create, inspect, extend, revoke, or delete
+grants as part of this execution skill.
