@@ -8,6 +8,7 @@ use crate::application;
 use crate::model::{AdminResponse, Request};
 use args::{Action, Cli};
 use clap::Parser;
+use clap::error::ErrorKind;
 use std::collections::HashSet;
 use std::error::Error;
 use std::io::{self, Write};
@@ -76,7 +77,16 @@ fn elevation_command(executable: &Path, token_stdin: bool, command: &[String]) -
 }
 
 pub fn run() -> Result<i32> {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) if error.kind() == ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+            // Opening the CLI without an operation is a successful request for
+            // guidance. It must not authenticate, prompt for a token, or open storage.
+            write!(io::stdout().lock(), "{}", error.render())?;
+            return Ok(0);
+        }
+        Err(error) => error.exit(),
+    };
     // SAFETY: getuid/geteuid do not accept pointers or mutate process state.
     let (uid, effective_uid) = unsafe { (libc::getuid(), libc::geteuid()) };
     if uid != effective_uid {

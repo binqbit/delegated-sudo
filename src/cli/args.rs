@@ -4,10 +4,119 @@ use crate::model::Request;
 use clap::{Parser, Subcommand};
 use std::io::{self, IsTerminal, Write};
 
+const OVERVIEW: &str = r#"delegated-sudo - temporary root access for named commands
+
+Create a named grant as an administrator, then share its secret token with the
+holder. The holder uses that token to execute the permitted command as root.
+
+CREATE A GRANT (ordinary sudo authorization)
+
+  Interactive command entry:
+    sudo delegated-sudo grant create <NAME> --ttl <TTL>
+    Enter the command at the Command: prompt. A final * allows extra arguments.
+    Example:
+      sudo delegated-sudo grant create compose-codex --ttl 30d
+      Command: docker compose *
+    At this prompt, the star needs no quotes or escaping.
+
+  Exact command:
+    sudo delegated-sudo grant create <NAME> --ttl <TTL> -- <COMMAND> [ARGUMENTS...]
+    Only this executable and these exact arguments are permitted.
+    Example:
+      sudo delegated-sudo grant create deploy --ttl 60m -- docker compose up -d
+
+  Command with additional arguments allowed:
+    sudo delegated-sudo grant create <NAME> --ttl <TTL> -- <COMMAND> [ARGUMENTS...] \*
+    Keep the fixed beginning; the holder may append zero or more arguments.
+    Example:
+      sudo delegated-sudo grant create compose-codex --ttl 30d -- docker compose \*
+    In a shell command, use \* or '*' so the shell does not expand filenames.
+
+  All operations of selected executables:
+    sudo delegated-sudo grant create <NAME> --ttl <TTL> --commands <EXECUTABLES>
+    Comma-separated executables; allow any arguments and subcommands, subject to
+    the shell-syntax restriction below.
+    Example:
+      sudo delegated-sudo grant create maintenance --ttl 1d --commands docker,systemctl
+
+  Creation displays the command, directory scope, secret token, and expiration.
+  The dir field is a path, PATH/* for a directory tree, or any if unrestricted.
+
+  Optional working-directory restriction (with any creation form):
+    --dir <PATH>      Permit launches only from this existing directory.
+    --dir <PATH>/*    Permit this directory and all its descendants.
+    Examples:
+      sudo delegated-sudo grant create project --ttl 30d --dir /srv/app
+      sudo delegated-sudo grant create project-tree --ttl 30d --dir /srv/app/\*
+      Command: docker compose *
+    Escape the star in a shell command, or quote the entire path.
+    Without --dir, the holder may launch from any working directory.
+    The command runs in the holder's current directory; it is never moved.
+    Paths are checked after resolving ../ and symlinks; locations outside the
+    permitted scope are refused. This checks the initial working directory,
+    not filesystem access by the command; it is not a filesystem sandbox.
+
+MANAGE GRANTS BY NAME (ordinary sudo authorization)
+
+  sudo delegated-sudo grant list
+    List all grants with their commands, directory restrictions, expiration, and status.
+    Expired and revoked grants remain visible. Tokens are never listed.
+
+  sudo delegated-sudo grant show <NAME>
+    Inspect command and directory scope, executable paths, expiration, and status.
+    Secret tokens are never shown.
+    Example: sudo delegated-sudo grant show compose-codex
+
+  sudo delegated-sudo grant extend <NAME> --ttl <TTL>
+    Set a new lifetime FROM NOW for an active or expired grant and show a new token.
+    The previous token stops working. Name, command, and directory scope stay the same.
+    Example: sudo delegated-sudo grant extend compose-codex --ttl 30d
+
+  sudo delegated-sudo grant revoke <NAME>
+    Disable the token and keep the grant visible. Revoked grants cannot be extended.
+    Example: sudo delegated-sudo grant revoke compose-codex
+
+  sudo delegated-sudo grant delete <NAME>
+    Delete the grant, invalidate its token, and make its name available again.
+    Example: sudo delegated-sudo grant delete compose-codex
+
+EXECUTE A GRANTED COMMAND (no leading sudo)
+
+  delegated-sudo exec [--] <COMMAND> [ARGUMENTS...]
+    Enter the secret at the hidden Delegation token: prompt.
+    Example: delegated-sudo exec -- docker compose up -d
+
+  delegated-sudo exec --token-stdin [--] <COMMAND> [ARGUMENTS...]
+    Read the token from stdin's first line; remaining input goes to the command.
+    Example: delegated-sudo exec --token-stdin -- docker compose up -d < /private/path/token
+
+  Use the granted executable name or its recorded path. Omit the grant's final *.
+  Commands run directly; shell operators and substitutions are rejected.
+  Supply the token on every invocation; do not put it in arguments or environment.
+
+NAMES AND LIFETIMES
+
+  NAME is required and unique, case-sensitive, and 1-80 characters long.
+  Quote spaces, for example "Docker Compose Codex". No leading dash, surrounding
+  whitespace, control characters, or invisible formatting.
+  TTL is a positive integer followed by s, m, h, or d: 60m, 2h, 7d, 30d.
+  Maximum: 30 days (30d). Expiration dates are displayed in UTC.
+  Grant administration reuses the ordinary sudo credential cache.
+
+HELP (no sudo required)
+
+  delegated-sudo              Show this complete guide.
+  delegated-sudo --help       Show this complete guide.
+  delegated-sudo -h           Show this complete guide.
+  delegated-sudo help         Show this complete guide.
+"#;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "delegated-sudo",
-    about = "Run root commands with an expiring command-scoped delegation token"
+    about = "Run root commands with an expiring command-scoped delegation token",
+    arg_required_else_help = true,
+    override_help = OVERVIEW
 )]
 pub(super) struct Cli {
     #[command(subcommand)]
@@ -17,6 +126,7 @@ pub(super) struct Cli {
 #[derive(Debug, Subcommand)]
 pub(super) enum Action {
     /// Administer grants using normal sudo/root authorization.
+    #[command(arg_required_else_help = true, override_help = OVERVIEW)]
     Grant {
         #[command(subcommand)]
         operation: GrantCommand,

@@ -12,6 +12,18 @@ The application is a single Rust binary. This build targets NixOS and uses
 ordinary sudo to obtain root privileges. Installation must establish the access
 rules below before token execution can work.
 
+## Help
+
+Run without arguments or request help to see every command, including all grant
+operations, descriptions, and practical examples in one place:
+
+```bash
+delegated-sudo
+delegated-sudo --help
+```
+
+`-h` and `help` show the same complete guide. Help does not require sudo.
+
 ## Required access rules
 
 System authorization and delegation have separate responsibilities:
